@@ -1,5 +1,7 @@
 import ctypes
 import sys
+import json
+import os
 
 def SetDPIAware():
     try:
@@ -26,13 +28,32 @@ from pywinauto import Application, Desktop
 # ============================================================
 #  CONFIG
 # ============================================================
-PHENOMENON_VALUE = "Appearance"
-FAILURE_CODE     = "F173"
-LOCATION         = "C801"
-DUTY_CODE       = "Process"
-REASON_CODE     = "SOLDERING--SOLDERING"
-HANDLING        = "Touchup"
-DUTY_DEPARTMENT = "ME"
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+def LoadConfig():
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    config_path = os.path.join(base_dir, "config.json")
+
+    if not os.path.exists(config_path):
+        default = {
+            "PHENOMENON_VALUE": "Appearance",
+            "FAILURE_CODE":     "F173",
+            "LOCATION":         "C801",
+            "DUTY_CODE":        "Process",
+            "REASON_CODE":      "SOLDERING--SOLDERING",
+            "HANDLING":         "Touchup",
+            "DUTY_DEPARTMENT":  "ME"
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(default, f, indent=4, ensure_ascii=False)
+        return default
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # ============================================================
 #  COLOR PALETTE
@@ -318,7 +339,7 @@ def FocusLocationCode(form):
     return None
 
 
-def FillDutyCombos(form, log_fn):
+def FillDutyCombos(form, duty_code, reason_code, handling, duty_department, log_fn):
     targets = []
     for c in form.descendants():
         try:
@@ -331,10 +352,10 @@ def FillDutyCombos(form, log_fn):
 
     # index → field mapping จาก debug
     fields = [
-        (2, DUTY_CODE,       "Duty Code"),
-        (3, REASON_CODE,     "Reason Code"),
-        (4, HANDLING,        "Handling"),
-        (5, DUTY_DEPARTMENT, "Duty Department"),
+        (2, duty_code,       "Duty Code"),
+        (3, reason_code,     "Reason Code"),
+        (4, handling,        "Handling"),
+        (5, duty_department, "Duty Department"),
     ]
 
     for idx, value, label in fields:
@@ -360,7 +381,7 @@ def FillDutyCombos(form, log_fn):
 
 def ClickOK(form):
     try:
-        # form.child_window(title="OK", class_name="TBitBtn").click()
+        form.child_window(title="OK", class_name="TBitBtn").click()
         time.sleep(0.3)
     except Exception as e:
         raise
@@ -369,7 +390,10 @@ def ClickOK(form):
 # ============================================================
 #  CORE
 # ============================================================
-def GetFirstRedErrorCode(main_form, phenomenon_value, sn, log_fn, status_fn):
+def GetFirstRedErrorCode(main_form, phenomenon_value, sn,
+                         failure_code, location,
+                         duty_code, reason_code, handling, duty_department,
+                         log_fn, status_fn):
 
     code          = None
     found_red_row = False
@@ -481,19 +505,19 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn, log_fn, status_fn):
         rform = rapp.window(handle=repair_win.handle)
 
         # 7b Failure Code
-        log_fn(f"  │ [7b] Failure Code = '{FAILURE_CODE}'", BLUE)
+        log_fn(f"  │ [7b] Failure Code = '{failure_code}'", BLUE)
         edit = FocusFailureCode(rform)
         if edit:
             time.sleep(0.2)
             edit.type_keys("^a{BACKSPACE}")
-            edit.type_keys(FAILURE_CODE)
+            edit.type_keys(failure_code)
             edit.type_keys("{ENTER}")
             log_fn("  │  └ ✓ Failure Code set", GREEN)
         else:
             log_fn("  │  └ ✗ Failure Code field not found", RED_ERR)
 
         # 7c Location Code
-        location_code = f"{sn}_{LOCATION}"
+        location_code = f"{sn}_{location}"
         log_fn(f"  │ [7c] Location Code = '{location_code}'", BLUE)
         loc_edit = FocusLocationCode(rform)
         if loc_edit:
@@ -513,7 +537,7 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn, log_fn, status_fn):
 
         # 7d Duty
         log_fn("  │ [7d] Filling Duty fields...", BLUE)
-        FillDutyCombos(rform, log_fn)
+        FillDutyCombos(rform, duty_code, reason_code, handling, duty_department, log_fn)
 
         # 7d OK
         log_fn("  │ [7d] Clicking OK...", BLUE)
@@ -530,6 +554,24 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn, log_fn, status_fn):
 # ============================================================
 def RunRepairProcess(sn, log_fn, status_fn):
     try:
+        cfg = LoadConfig()
+        phenomenon_value = cfg.get("PHENOMENON_VALUE", "Appearance")
+        failure_code     = cfg.get("FAILURE_CODE",     "F173")
+        location         = cfg.get("LOCATION",         "C801")
+        duty_code        = cfg.get("DUTY_CODE",        "Process")
+        reason_code      = cfg.get("REASON_CODE",      "SOLDERING--SOLDERING")
+        handling         = cfg.get("HANDLING",         "Touchup")
+        duty_department  = cfg.get("DUTY_DEPARTMENT",  "ME")
+
+        log_fn(f"· Config loaded:", BLUE)
+        log_fn(f"  Phenomenon : {phenomenon_value}", TEXT_SEC)
+        log_fn(f"  Failure    : {failure_code}", TEXT_SEC)
+        log_fn(f"  Location   : {location}", TEXT_SEC)
+        log_fn(f"  Duty Code  : {duty_code}", TEXT_SEC)
+        log_fn(f"  Reason     : {reason_code}", TEXT_SEC)
+        log_fn(f"  Handling   : {handling}", TEXT_SEC)
+        log_fn(f"  Department : {duty_department}", TEXT_SEC)
+
         log_fn("━" * 42, AMBER)
         log_fn(f"  Serial Number : {sn}", TEXT_PRI)
         log_fn("━" * 42, AMBER)
@@ -583,7 +625,10 @@ def RunRepairProcess(sn, log_fn, status_fn):
         status_fn("DETECTING", AMBER)
         log_fn("· Starting detection & repair flow...", BLUE)
         code, red_row_exists = GetFirstRedErrorCode(
-            repair_form, PHENOMENON_VALUE, sn, log_fn, status_fn
+            repair_form, phenomenon_value, sn,
+            failure_code, location,
+            duty_code, reason_code, handling, duty_department,
+            log_fn, status_fn
         )
 
         # ── Result ───────────────────────────────────────────

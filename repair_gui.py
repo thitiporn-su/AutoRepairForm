@@ -53,6 +53,54 @@ TEXT_SEC  = "#6b7280"
 TEXT_MONO = "#a8b0c0"
 
 
+
+import sys
+
+import struct
+
+import warnings
+ 
+def CheckPythonBitness():
+
+    """
+
+    ตรวจสอบ Python bitness และแจ้งเตือนถ้าไม่ตรงกับ target app
+
+    suppress warning ของ pywinauto ไปในตัว
+
+    """
+
+    # suppress pywinauto warning เสมอ
+
+    warnings.filterwarnings(
+
+        "ignore",
+
+        category=UserWarning,
+
+        module="pywinauto"
+
+    )
+ 
+    bits = struct.calcsize("P") * 8  # 32 หรือ 64
+
+    if bits == 64:
+
+        print(
+
+            f"[WARN] Running 64-bit Python — automating 32-bit app may have issues.\n"
+
+            f"       Recommended: install Python 32-bit from python.org\n"
+
+            f"       Current: {sys.executable}"
+
+        )
+
+    else:
+
+        print(f"[INFO] Python {bits}-bit — OK")
+
+
 # ============================================================
 #  DPI HELPER
 # ============================================================
@@ -77,9 +125,11 @@ def GrabWindow(hwnd, rect=None):
     hwnd : handle ของ main_form
     rect : pywinauto rectangle — crop เฉพาะส่วนนี้
     """
-    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-    win_w = right  - left
-    win_h = bottom - top
+    client_rect = win32gui.GetClientRect(hwnd)
+    client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+
+    win_w = client_rect[2]
+    win_h = client_rect[3]
 
     hwnd_dc = win32gui.GetWindowDC(hwnd)
     mfc_dc  = win32ui.CreateDCFromHandle(hwnd_dc)
@@ -107,10 +157,12 @@ def GrabWindow(hwnd, rect=None):
     win32gui.ReleaseDC(hwnd, hwnd_dc)
 
     if rect is not None:
-        crop_l = rect.left   - left
-        crop_t = rect.top    - top
-        crop_r = rect.right  - left
-        crop_b = rect.bottom - top
+        client_origin = win32gui.ClientToScreen(hwnd, (0, 0))
+
+        crop_l = rect.left   - client_origin[0]
+        crop_t = rect.top    - client_origin[1]
+        crop_r = rect.right  - client_origin[0]
+        crop_b = rect.bottom - client_origin[1]
         img = img.crop((crop_l, crop_t, crop_r, crop_b))
         print(f"[DEBUG] Cropped {img.width}x{img.height}px "
               f"(rel: {crop_l},{crop_t},{crop_r},{crop_b})")
@@ -142,7 +194,7 @@ def WaitForMainForm(timeout=10):
     print("[INFO] Waiting for TfrmMain...")
     start = time.time()
     while time.time() - start < timeout:
-        for w in Desktop(backend="win32").windows(title_re=r"^Repair-Rev"):
+        for w in Desktop(backend="uia").windows(title_re=r"^Repair-Rev"):
             if w.class_name() == "TfrmMain":
                 print("[INFO] TfrmMain found!")
                 return w
@@ -155,7 +207,7 @@ def WaitForRepairWindow(timeout=10):
     print("[INFO] Waiting for Repair Window...")
     start = time.time()
     while time.time() - start < timeout:
-        wins = Desktop(backend="win32").windows(title_re=r"^Repair Window")
+        wins = Desktop(backend="uia").windows(title_re=r"^Repair Window")
         if wins:
             print("[INFO] Repair Window found!")
             return wins[0]
@@ -252,7 +304,7 @@ def FindErrorCodeEdit(main_form):
 # def SelectPhenomenon(repair_win_handle, value):
 #     try:
 #         from pywinauto import Desktop
-#         app = Desktop(backend="win32")
+#         app = Desktop(backend="uia")
 #         form = app.window(handle=repair_win_handle.handle)
 #         form.set_focus()
 
@@ -285,7 +337,7 @@ def SelectPhenomenon(repair_win_handle, value):
         from pywinauto import Desktop
         import time
 
-        app = Desktop(backend="win32")
+        app = Desktop(backend="uia")
         form = app.window(handle=repair_win_handle.handle)
         form.set_focus()
         time.sleep(0.3)
@@ -428,10 +480,11 @@ def GetFirstRedErrorCode(main_form, phenomenon_value):
     
     # คลิกเพื่อให้ UI อัปเดตค่าเข้า TDBEdit
     main_form.click_input(coords=(
-        click_x - main_rect.left,
-        first_red_y - main_rect.top,
+        click_x,
+        first_red_y
     ))
     time.sleep(0.5) # รอให้ Text ใน Edit เปลี่ยนค่า
+
 
     # ── อ่าน Error Code (ปรับปรุงให้หาตัวที่มี Text) ──────────────
     error_code_edit = FindErrorCodeEdit(main_form)
@@ -458,7 +511,7 @@ def GetFirstRedErrorCode(main_form, phenomenon_value):
                 SelectPhenomenon(repair_win, phenomenon_value)
                 
                 # หาปุ่ม OK ใน Repair Window
-                rapp = Application(backend="win32").connect(handle=repair_win.handle)
+                rapp = Application(backend="uia").connect(handle=repair_win.handle)
                 rform = rapp.window(handle=repair_win.handle)
                 ClickOK(rform)
             else:
@@ -478,7 +531,7 @@ def RunRepairProcess(sn, log_fn, status_fn):
         log_fn(f"Serial Number: {sn}")
 
         # ── หา TFrmInputSN ───────────────────────────────────
-        repair_windows = Desktop(backend="win32").windows(
+        repair_windows = Desktop(backend="uia").windows(
             title_re=r"^Repair-Rev",
             top_level_only=True,
             visible_only=True,
@@ -492,7 +545,7 @@ def RunRepairProcess(sn, log_fn, status_fn):
             repair_windows[0]
         )
 
-        app        = Application(backend="win32").connect(handle=window.handle)
+        app        = Application(backend="uia").connect(handle=window.handle)
         input_form = app.window(handle=window.handle)
         input_form.set_focus()
 
@@ -512,7 +565,7 @@ def RunRepairProcess(sn, log_fn, status_fn):
         log_fn("Waiting for main form...")
         main_window = WaitForMainForm(timeout=10)
 
-        repair_app  = Application(backend="win32").connect(handle=main_window.handle)
+        repair_app  = Application(backend="uia").connect(handle=main_window.handle)
         repair_form = repair_app.window(handle=main_window.handle)
         repair_form.set_focus()
         time.sleep(1)
@@ -764,6 +817,7 @@ class RepairGUI:
 #  ENTRY POINT
 # ============================================================
 if __name__ == "__main__":
+    CheckPythonBitness()
     root = tk.Tk()
     app  = RepairGUI(root)
     root.mainloop()

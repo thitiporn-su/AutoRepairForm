@@ -4,16 +4,16 @@ import threading
 import time
 import ctypes
 import PIL.ImageGrab
-import numpy as np
+
 from PIL import ImageGrab
 from datetime import datetime
-from pywinauto import Application, Desktop, mouse, keyboard
-
-import pytesseract
-
+from pywinauto import Application, Desktop, mouse
 import ctypes
-import ReadData
-
+ctypes.windll.shcore.SetProcessDpiAwareness(1)
+try:
+    import ReadData
+except ImportError:
+    ReadData = None
 
 
 # ============================================================
@@ -32,53 +32,6 @@ TEXT_SEC   = "#6b7280"
 TEXT_MONO  = "#a8b0c0"
 CYAN       = "#38bdf8"
 
-
-import sys
-
-import struct
-
-import warnings
- 
-def CheckPythonBitness():
-
-    """
-
-    ตรวจสอบ Python bitness และแจ้งเตือนถ้าไม่ตรงกับ target app
-
-    suppress warning ของ pywinauto ไปในตัว
-
-    """
-
-    # suppress pywinauto warning เสมอ
-
-    warnings.filterwarnings(
-
-        "ignore",
-
-        category=UserWarning,
-
-        module="pywinauto"
-
-    )
- 
-    bits = struct.calcsize("P") * 8  # 32 หรือ 64
-
-    if bits == 64:
-
-        print(
-
-            f"[WARN] Running 64-bit Python — automating 32-bit app may have issues.\n"
-
-            f"       Recommended: install Python 32-bit from python.org\n"
-
-            f"       Current: {sys.executable}"
-
-        )
-
-    else:
-
-        print(f"[INFO] Python {bits}-bit — OK")
- 
 # ============================================================
 #  DPI / COLOR HELPERS
 # ============================================================
@@ -173,79 +126,58 @@ def FindErrorCodeEdit(main_form):
         return all_dbedits[1]
     return None
 
-def ClickAddRepairButton(main_form, log_fn=None):
-    """
-    ใช้ pywinauto ค้นหาและคลิกปุ่ม Add โดยตรง 
-    ไม่ต้องสแกนสีพิกเซล เพื่อความแม่นยำสูงสุด
-    """
-    try:
-        # 1. ค้นหาปุ่มที่มีคำว่า "Add" (จากรูปที่คุณส่งมา ปุ่มชื่อ Add และมีเครื่องหมายบวก)
-        # เราหาจาก descendants ที่เป็น Class TBitBtn (มาตรฐานของ Delphi)
-        btn_new = None
-        for ctrl in main_form.descendants():
-            if ctrl.class_name() == "TBitBtn" and "Add" in ctrl.window_text():
-                btn_new = ctrl
-                break
-        
-        if btn_new:
-            # ใช้ click_input() เพื่อจำลองการคลิกเมาส์จริงที่ตัวปุ่ม
-            btn_new.click_input()
-            if log_fn: log_fn("Successfully clicked 'Add' button", color="#3ddc84")
-            return True
-        else:
-            if log_fn: log_fn("Could not find 'Add' button", color="#ff4f4f")
-            return False
+def GetFirstRedErrorCode(main_form):
+    # 1. Find the specific "Error Code List" grid (TDBGrid)
+    target_grid = FindErrorCodeDBGrid(main_form)
+    if not target_grid: 
+        return None
 
-    except Exception as e:
-        if log_fn: log_fn(f"Error clicking Add button: {str(e)}", color="#ff4f4f")
-        return False
+    # 2. Get the screen coordinates of just this grid
+    rect = target_grid.rectangle()
+    
+    # 3. Use PIL.ImageGrab on only this Bounding Box (bbox)
+    # Note: We add a small margin to avoid the grid borders
+    img = PIL.ImageGrab.grab(bbox=(
+        rect.left + 5, 
+        rect.top,  # Skip the "Error Code" header
+        rect.right - 20, # Skip scrollbar
+        rect.bottom - 5
+    ))
+    img.save("red_detect.png")
 
-def GetFirstRedErrorCode(main_form, log_fn=None):
-    # 1. Get the App window's current position on the screen
-    app_rect = main_form.rectangle()
-    
-    # 2. Calculate the total width of the window
-    app_w = app_rect.right - app_rect.left
-    
-    # 3. Define the Bounding Box (L, T, R, B)
-    # We start at the left edge and end 40% of the way across
-    capture_bbox = (
-        app_rect.left + 5,      # เริ่มจากขอบซ้ายของหน้าต่างจริงๆ
-        app_rect.top + 100,     # หลบ Header ของโปรแกรม
-        app_rect.left + 250,    # แคปเฉพาะแถบแคบๆ ทางซ้ายที่แสดง Error Code
-        app_rect.bottom - 5
-    )                  # [BOTTOM] Go to the bottom edge
-
-    
-    # 4. Grab the image (This is ONLY the left 40% of the app)
-    img = PIL.ImageGrab.grab(bbox=capture_bbox)
-    img.save("red_detect.png") 
-    
-    # 5. Scan the pixels in this "Left Side" image
-    img_w, img_h = img.size
+    width, height = img.size
     pixels = img.load()
-    found_pos_local = None
 
-    # Scan bottom-to-top for the Red row
-    for y in range(0, img_h, 3):
-        for x in range(0, img_w, 5):
+    # 4. Scan the small image for red background
+    for y in range(0, height, 5):
+        for x in range(0, width, 5):
             r, g, b = pixels[x, y][:3]
-            # Red detection (F561 color)
+            
+            # Bright Red Detection (Matches F561 row in your image)
             if r > 200 and g < 60 and b < 60:
-                found_pos_local = (x, y)
-                break
-        if found_pos_local: break
-
-    # 6. Click the row if found
-    if found_pos_local:
-        screen_x = capture_bbox[0] + found_pos_local[0]
-        screen_y = capture_bbox[1] + found_pos_local[1] + 10 #ship to click RED
-
-        if log_fn: log_fn(f"Targeted RED row at {screen_x}, {screen_y}")
-        time.sleep(0.3)  # small delay before click
-        mouse.click(button='left', coords=(screen_x, screen_y))
-        ClickAddRepairButton(main_form, log_fn)
-        return (screen_x, screen_y)
+                # Calculate screen position to move mouse and click
+                screen_x = rect.left + 10 + x
+                screen_y = rect.top + 10 + y
+                
+                # Step A: Move and Click the red row
+                mouse.move(coords=(screen_x, screen_y))
+                time.sleep(0.1)
+                mouse.click(button='left', coords=(screen_x, screen_y))
+                
+                # Step B: Click the "Add" button
+                time.sleep(0.5)
+                try:
+                    btn_add = main_form.child_window(title="Add", class_name="TBitBtn")
+                    btn_add.click()
+                except:
+                    pass
+                
+                # Step C: Extract the dynamic code (F561) from the Edit field
+                for edit in main_form.descendants(class_name="TDBEdit"):
+                    val = edit.window_text().strip()
+                    if val and val != "N/A" and not (val.isdigit() and len(val) == 12):
+                        return val
+                return "RED_FOUND"
 
     return None
 
@@ -309,60 +241,6 @@ def RunRepairProcess(sn, log_fn, status_fn):
         status_fn("FAILED", RED_ERR)
         return None
 
-def GetRepairWindowRect():
-    """Get the bounding rect of the Repair Window."""
-    repair_win = Desktop(backend="win32").window(title="Repair Window")
-    repair_win.wait("visible", timeout=10)
-    repair_win.set_focus()
-    time.sleep(0.3)
-    r = repair_win.rectangle()
-    return repair_win, r
-
-def CaptureWindow(rect):
-    """Screenshot just the Repair Window."""
-    img = PIL.ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom))
-    return img
-
-
-def ClickInputNextToLabel(win_rect, label_box, img, log_fn=print):
-    """
-    Given a label bounding box (relative to window screenshot),
-    click the INPUT FIELD that sits to its right on the same row.
-    
-    Strategy: scan the image pixels to the right of the label
-    looking for a white/light-yellow rectangle (input field).
-    """
-    lx, ly, lw, lh = label_box
-    img_w, img_h = img.size
-    pixels = img.load()
-
-    # Search rightward from end of label, on the same vertical band
-    search_y_center = ly + lh // 2
-    search_y_range  = range(max(0, search_y_center - 4), min(img_h, search_y_center + 4))
-
-    input_x = None
-    for x in range(lx + lw + 5, min(img_w, lx + lw + 300)):
-        for y in search_y_range:
-            r, g, b = pixels[x, y][:3]
-            # Input fields are white or light yellow (Delphi default)
-            if r > 220 and g > 220 and b > 180:
-                input_x = x
-                break
-        if input_x:
-            break
-
-    if input_x is None:
-        log_fn(f"  Could not find input field to the right of label")
-        return False
-
-    # Convert image-relative coords → screen coords
-    screen_x = win_rect.left + input_x + 10   # +10 to land inside the field
-    screen_y = win_rect.top
-
-    from pywinauto import mouse
-    mouse.click(button="left", coords=(screen_x, screen_y))
-    time.sleep(0.15)
-    return True
 
 # ============================================================
 #  GUI
@@ -628,7 +506,6 @@ class RepairGUI:
 # ============================================================
 
 if __name__ == "__main__":
-    CheckPythonBitness()
     root = tk.Tk()
     app  = RepairGUI(root)
     root.mainloop()

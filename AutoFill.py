@@ -4,9 +4,12 @@ import threading
 import time
 import ctypes
 import PIL.ImageGrab
-from datetime import datetime
-from pywinauto import Application, Desktop
 
+from PIL import ImageGrab
+from datetime import datetime
+from pywinauto import Application, Desktop, mouse
+import ctypes
+ctypes.windll.shcore.SetProcessDpiAwareness(1)
 try:
     import ReadData
 except ImportError:
@@ -28,6 +31,54 @@ TEXT_PRI   = "#e8eaf0"
 TEXT_SEC   = "#6b7280"
 TEXT_MONO  = "#a8b0c0"
 CYAN       = "#38bdf8"
+
+
+import sys
+
+import struct
+
+import warnings
+ 
+def CheckPythonBitness():
+
+    """
+
+    ตรวจสอบ Python bitness และแจ้งเตือนถ้าไม่ตรงกับ target app
+
+    suppress warning ของ pywinauto ไปในตัว
+
+    """
+
+    # suppress pywinauto warning เสมอ
+
+    warnings.filterwarnings(
+
+        "ignore",
+
+        category=UserWarning,
+
+        module="pywinauto"
+
+    )
+ 
+    bits = struct.calcsize("P") * 8  # 32 หรือ 64
+
+    if bits == 64:
+
+        print(
+
+            f"[WARN] Running 64-bit Python — automating 32-bit app may have issues.\n"
+
+            f"       Recommended: install Python 32-bit from python.org\n"
+
+            f"       Current: {sys.executable}"
+
+        )
+
+    else:
+
+        print(f"[INFO] Python {bits}-bit — OK")
+ 
 
 
 # ============================================================
@@ -62,7 +113,7 @@ def GrabWithDPI(rect):
     ))
 
 def is_red_bg(r, g, b):
-    return r > 150 and g < 100 and b < 100 and r > g * 2 and r > b * 2
+    return r > 200 and g < 60 and b < 60
 
 
 # ============================================================
@@ -125,47 +176,61 @@ def FindErrorCodeEdit(main_form):
     return None
 
 def GetFirstRedErrorCode(main_form):
-    SetDPIAware()
+    # 1. Find the specific "Error Code List" grid (TDBGrid)
     target_grid = FindErrorCodeDBGrid(main_form)
-    if not target_grid:
-        return None
-    grid_rect     = target_grid.rectangle()
-    img           = GrabWithDPI(grid_rect)
-    pixels        = img.load()
-    width, height = img.size
-    img.save("debug_grid.png")
-
-    first_red_y = None
-    in_red_band = False
-    scale       = GetScaleFactor()
-    for y in range(height):
-        red_count = sum(1 for x in range(width) if is_red_bg(*pixels[x, y]))
-        if red_count > width * 0.1:
-            if not in_red_band:
-                first_red_y = grid_rect.top + int(y / scale)
-                in_red_band = True
-                break
-        else:
-            in_red_band = False
-
-    if first_red_y is None:
+    if not target_grid: 
         return None
 
-    error_code_edit = FindErrorCodeEdit(main_form)
-    if not error_code_edit:
-        return None
-
-    main_rect = main_form.rectangle()
-    click_x   = grid_rect.left + (grid_rect.right - grid_rect.left) // 2
-    main_form.click_input(coords=(
-        click_x     - main_rect.left,
-        first_red_y - main_rect.top,
+    # 2. Get the screen coordinates of just this grid
+    rect = target_grid.rectangle()
+    
+    # 3. Use PIL.ImageGrab on only this Bounding Box (bbox)
+    # Note: We add a small margin to avoid the grid borders
+    img = PIL.ImageGrab.grab(bbox=(
+        rect.left + 5, 
+        rect.top,  # Skip the "Error Code" header
+        rect.right - 20, # Skip scrollbar
+        rect.bottom - 5
     ))
-    time.sleep(0.3)
-    try:
-        return error_code_edit.texts()[0].strip() or None
-    except Exception:
-        return None
+    img.save("debug_grid_only.png") # Check this; it should be just the list
+
+    width, height = img.size
+    pixels = img.load()
+
+    # 4. Scan the small image for red background
+    for y in range(0, height, 5):
+        for x in range(0, width, 5):
+            r, g, b = pixels[x, y][:3]
+            
+            # Bright Red Detection (Matches F561 row in your image)
+            if r > 200 and g < 60 and b < 60:
+                # Calculate screen position to move mouse and click
+                screen_x = rect.left + 5 + x
+                screen_y = rect.top + 30 + y
+                
+                # Step A: Move and Click the red row
+                mouse.move(coords=(screen_x, screen_y))
+                time.sleep(0.1)
+                mouse.click(button='left', coords=(screen_x, screen_y))
+                
+                # Step B: Click the "Add" button
+                time.sleep(0.5)
+                try:
+                    btn_add = main_form.child_window(title="Add", class_name="TBitBtn")
+                    btn_add.click()
+                except:
+                    pass
+                
+                # Step C: Extract the dynamic code (F561) from the Edit field
+                for edit in main_form.descendants(class_name="TDBEdit"):
+                    val = edit.window_text().strip()
+                    if val and val != "N/A" and not (val.isdigit() and len(val) == 12):
+                        return val
+                return "RED_FOUND"
+
+    return None
+
+
 
 def RunRepairProcess(sn, log_fn, status_fn):
     try:
@@ -491,6 +556,7 @@ class RepairGUI:
 # ============================================================
 
 if __name__ == "__main__":
+    CheckPythonBitness()
     root = tk.Tk()
     app  = RepairGUI(root)
     root.mainloop()

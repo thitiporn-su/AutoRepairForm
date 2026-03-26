@@ -1,195 +1,496 @@
+import tkinter as tk
+from tkinter import font as tkfont
+import threading
 import time
 import ctypes
-import ReadData
 import PIL.ImageGrab
+from datetime import datetime
 from pywinauto import Application, Desktop
-import win32con
-import win32gui
 
-def RedErrorExists(main_form):
-    rect = main_form.rectangle()
-    img = PIL.ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom))
-    width, height = img.size
-    print(f"Scanning area {width}X{height}")
+try:
+    import ReadData
+except ImportError:
+    ReadData = None
 
-    def is_red(r, g, b):
-        return r == 255 and g == 0 and b == 0
 
-    for y in range(50, height): 
-        for x in range(0, width-50):
-            r, g, b = img.getpixel((x, y))
-            
-            if is_red(r, g, b):
-                print(f"[FOUND RED] at ({x},{y}) -> RGB({r},{g},{b})")
-                print(f"[CLICK] Red error detected at screen ({x},{y})")
-                main_form.click_input(coords=(x, y))
-                return True
+# ============================================================
+#  COLOR PALETTE  — dark industrial / amber accent
+# ============================================================
+BG_DARK    = "#0e0f11"
+BG_PANEL   = "#16181c"
+BG_INPUT   = "#1e2128"
+BORDER     = "#2a2d35"
+AMBER      = "#f5a623"
+AMBER_DIM  = "#7a5212"
+GREEN      = "#3ddc84"
+RED_ERR    = "#ff4f4f"
+TEXT_PRI   = "#e8eaf0"
+TEXT_SEC   = "#6b7280"
+TEXT_MONO  = "#a8b0c0"
+CYAN       = "#38bdf8"
 
-            # window.click_input(coords=(x, y))
-        
-    return False
 
-def DebugChildren(main_form):
-    print("\n=== All children of main_form ===")
-    for child in main_form.descendants():
+# ============================================================
+#  DPI / COLOR HELPERS
+# ============================================================
+
+def SetDPIAware():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
         try:
-            rect = child.rectangle()
-            texts = child.texts()
-            print(f"  class='{child.class_name()}' | text={texts} | rect={rect}")
-        except:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
             pass
 
-def DebugAllWindows(main_form):
-    """ดู window ทั้งหมดที่เปิดอยู่ รวม popup"""
-    print("\n=== All top-level Repair windows ===")
-    all_windows = Desktop(backend="win32").windows(title_re=r"^Repair-Rev")
-    for w in all_windows:
-        print(f"\n>> handle={w.handle} title='{w.window_text()}' class='{w.class_name()}'")
-        print(f"   rect={w.rectangle()}")
-        for child in w.descendants():
-            try:
-                print(f"     child class='{child.class_name()}' text={child.texts()[:2]} rect={child.rectangle()}")
-            except:
-                pass
+def GetScaleFactor():
+    try:
+        hdc = ctypes.windll.user32.GetDC(0)
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        return dpi / 96.0
+    except Exception:
+        return 1.0
+
+def GrabWithDPI(rect):
+    scale = GetScaleFactor()
+    return PIL.ImageGrab.grab(bbox=(
+        int(rect.left   * scale),
+        int(rect.top    * scale),
+        int(rect.right  * scale),
+        int(rect.bottom * scale),
+    ))
+
+def is_red_bg(r, g, b):
+    return r > 150 and g < 100 and b < 100 and r > g * 2 and r > b * 2
+
+
+# ============================================================
+#  REPAIR LOGIC
+# ============================================================
 
 def WaitForMainForm(timeout=10):
-    """รอจนกว่า TfrmMain จะปรากฏ"""
     start = time.time()
     while time.time() - start < timeout:
         all_windows = Desktop(backend="win32").windows(title_re=r"^Repair-Rev")
         for w in all_windows:
             if w.class_name() == "TfrmMain":
-                print("[INFO] TfrmMain found!")
                 return w
         time.sleep(0.5)
-    raise RuntimeError("Timeout: TfrmMain did not appear")
+    raise RuntimeError(f"Timeout {timeout}s: TfrmMain did not appear")
 
-def GetRedErrorCodesFromDBGrid(main_form):
-    # หา TDBGrid ฝั่งซ้าย (Error Code List)
-    target_grid = None
+def FindErrorCodeDBGrid(main_form):
+    all_grids = []
     for child in main_form.descendants():
         try:
             if child.class_name() == "TDBGrid":
-                r = child.rectangle()
-                if r.left < 900 and r.top < 400:
-                    target_grid = child
-                    break
-        except:
+                all_grids.append(child)
+        except Exception:
             pass
+    if not all_grids:
+        return None
+    anchor_btn = None
+    for child in main_form.descendants():
+        try:
+            if child.class_name() == "TBitBtn" and child.texts()[0] in ("New", "Remove"):
+                anchor_btn = child
+                break
+        except Exception:
+            pass
+    if anchor_btn:
+        btn_rect = anchor_btn.rectangle()
+        for grid in all_grids:
+            r = grid.rectangle()
+            if r.bottom <= btn_rect.top and abs(r.left - btn_rect.left) < 50:
+                return grid
+    return min(all_grids, key=lambda g: g.rectangle().left)
 
-    if not target_grid:
-        print("[ERROR] Cannot find Error Code TDBGrid")
-        return []
-
-    grid_rect = target_grid.rectangle()
-
-    # Screenshot เฉพาะ TDBGrid
-    img = PIL.ImageGrab.grab(bbox=(
-        grid_rect.left, grid_rect.top,
-        grid_rect.right, grid_rect.bottom
-    ))
-    pixels = img.load()
-    width, height = img.size
-
-    def is_red_bg(r, g, b):
-        return r > 180 and g < 80 and b < 80
-
-    # หา Y ของแต่ละ red row
-    red_row_screen_ys = []
-    in_red_band = False
-    for y in range(height):
-        red_count = sum(1 for x in range(width) if is_red_bg(*pixels[x, y]))
-        if red_count > width * 0.2:
-            if not in_red_band:
-                red_row_screen_ys.append(grid_rect.top + y + 2)
-                in_red_band = True
-        else:
-            in_red_band = False
-
-    if not red_row_screen_ys:
-        print("[INFO] No red rows found")
-        return []
-
-    # หา TDBEdit Error Code field
-    error_code_edit = None
+def FindErrorCodeEdit(main_form):
+    all_dbedits = []
     for child in main_form.descendants():
         try:
             if child.class_name() == "TDBEdit":
-                r = child.rectangle()
-                if 1100 < r.left < 1200 and 250 < r.top < 300:
-                    error_code_edit = child
-                    break
-        except:
+                all_dbedits.append(child)
+        except Exception:
             pass
-
-    if not error_code_edit:
-        print("[ERROR] Cannot find Error Code TDBEdit")
-        return []
-
-    # Click แต่ละ red row แล้วอ่าน Error Code
-    results = []
-    main_rect = main_form.rectangle()
-    click_x = grid_rect.left + (grid_rect.right - grid_rect.left) // 2
-
-    for screen_y in red_row_screen_ys:
-        main_form.click_input(coords=(
-            click_x - main_rect.left,
-            screen_y - main_rect.top
-        ))
-        time.sleep(0.3)
-
+    for edit in all_dbedits:
         try:
-            code = error_code_edit.texts()[0].strip()
-            if code and code not in results:
-                print(f"  → Error Code: '{code}'")
-                results.append(code)
-        except Exception as e:
-            print(f"  [ERROR] {e}")
+            text = edit.texts()[0].strip()
+            if text.isdigit() and len(text) == 12:
+                return edit
+        except Exception:
+            pass
+    if len(all_dbedits) >= 2:
+        return all_dbedits[1]
+    return None
 
-    return results
+def GetFirstRedErrorCode(main_form):
+    SetDPIAware()
+    target_grid = FindErrorCodeDBGrid(main_form)
+    if not target_grid:
+        return None
+    grid_rect     = target_grid.rectangle()
+    img           = GrabWithDPI(grid_rect)
+    pixels        = img.load()
+    width, height = img.size
+    img.save("debug_grid.png")
 
-def main():
-    DATA = ReadData.GetFormData()
-    SN = DATA["serial_number"]
+    first_red_y = None
+    in_red_band = False
+    scale       = GetScaleFactor()
+    for y in range(height):
+        red_count = sum(1 for x in range(width) if is_red_bg(*pixels[x, y]))
+        if red_count > width * 0.1:
+            if not in_red_band:
+                first_red_y = grid_rect.top + int(y / scale)
+                in_red_band = True
+                break
+        else:
+            in_red_band = False
 
-    time.sleep(3)
+    if first_red_y is None:
+        return None
 
-    repair_windows = Desktop(backend="win32").windows(
-        title_re=r"^Repair-Rev",
-        top_level_only=True,
-        visible_only=True,
-    )
+    error_code_edit = FindErrorCodeEdit(main_form)
+    if not error_code_edit:
+        return None
 
-    if not repair_windows:
-        raise RuntimeError("Could not find a visible top-level 'Repair-Rev' window.")
+    main_rect = main_form.rectangle()
+    click_x   = grid_rect.left + (grid_rect.right - grid_rect.left) // 2
+    main_form.click_input(coords=(
+        click_x     - main_rect.left,
+        first_red_y - main_rect.top,
+    ))
+    time.sleep(0.3)
+    try:
+        return error_code_edit.texts()[0].strip() or None
+    except Exception:
+        return None
 
-    foreground_handle = ctypes.windll.user32.GetForegroundWindow()
-    window = next((win for win in repair_windows if win.handle == foreground_handle), repair_windows[0])
+def RunRepairProcess(sn, log_fn, status_fn):
+    try:
+        status_fn("SCANNING", AMBER)
+        log_fn(f"Serial Number: {sn}")
 
-    app = Application(backend="win32").connect(handle=window.handle)
-    main_form = app.window(handle=window.handle)
-    main_form.set_focus()
+        repair_windows = Desktop(backend="win32").windows(
+            title_re=r"^Repair-Rev",
+            top_level_only=True,
+            visible_only=True,
+        )
+        if not repair_windows:
+            raise RuntimeError("Repair-Rev window not found")
 
-    SN_input = main_form.child_window(class_name="TEdit", found_index=0)
-    SN_input.set_edit_text(SN)
-    print('fill serial number done !!!! ')
+        foreground_handle = ctypes.windll.user32.GetForegroundWindow()
+        window = next(
+            (w for w in repair_windows if w.handle == foreground_handle),
+            repair_windows[0]
+        )
 
-    btn_repair = main_form.child_window(title="Repair", class_name="TBitBtn", found_index=0)
-    btn_repair.click()
-    print('click repair button done !!!! ')
+        app       = Application(backend="win32").connect(handle=window.handle)
+        input_form = app.window(handle=window.handle)
+        input_form.set_focus()
 
-    main_window = WaitForMainForm(timeout=10)
-    repair_app  = Application(backend="win32").connect(handle=main_window.handle)
-    repair_form = repair_app.window(handle=main_window.handle)
-    repair_form.set_focus()
-    time.sleep(1)
+        sn_input = input_form.child_window(class_name="TEdit", found_index=0)
+        sn_input.set_edit_text(sn)
+        log_fn("Filled serial number")
 
-    red_codes = GetRedErrorCodesFromDBGrid(repair_form)
+        btn_repair = input_form.child_window(title="Repair", class_name="TBitBtn", found_index=0)
+        btn_repair.click()
+        log_fn("Clicked Repair button")
 
-    if red_codes:
-        print(f"\n✅ Red error codes: {red_codes}")
-    else:
-        print("\nℹ️ No red error codes found.")
-        
+        status_fn("LOADING", AMBER)
+        log_fn("Waiting for main form...")
+        main_window = WaitForMainForm(timeout=10)
+
+        repair_app  = Application(backend="win32").connect(handle=main_window.handle)
+        repair_form = repair_app.window(handle=main_window.handle)
+        repair_form.set_focus()
+        time.sleep(1)
+        log_fn("Main form ready")
+
+        status_fn("DETECTING", AMBER)
+        log_fn("Scanning for red error codes...")
+        code = GetFirstRedErrorCode(repair_form)
+
+        if code:
+            log_fn(f"Error code found: {code}", color=RED_ERR)
+            status_fn("ERROR FOUND", RED_ERR)
+        else:
+            log_fn("No red error codes found", color=GREEN)
+            status_fn("PASS", GREEN)
+
+        return code
+
+    except Exception as e:
+        log_fn(f"[EXCEPTION] {e}", color=RED_ERR)
+        status_fn("FAILED", RED_ERR)
+        return None
+
+
+# ============================================================
+#  GUI
+# ============================================================
+
+class RepairGUI:
+    def __init__(self, root):
+        self.root  = root
+        self.root.title("Repair Automation")
+        self.root.configure(bg=BG_DARK)
+        self.root.resizable(False, False)
+        self.root.geometry("620x720")
+
+        self._build_fonts()
+        self._build_ui()
+        self._set_ready()
+
+        # focus barcode input เสมอ
+        self.sn_entry.focus_set()
+
+    # ── fonts ───────────────────────────────────────────────
+    def _build_fonts(self):
+        self.f_title  = tkfont.Font(family="Consolas", size=13, weight="bold")
+        self.f_label  = tkfont.Font(family="Consolas", size=9)
+        self.f_entry  = tkfont.Font(family="Consolas", size=16, weight="bold")
+        self.f_status = tkfont.Font(family="Consolas", size=22, weight="bold")
+        self.f_log    = tkfont.Font(family="Consolas", size=9)
+        self.f_btn    = tkfont.Font(family="Consolas", size=10, weight="bold")
+        self.f_badge  = tkfont.Font(family="Consolas", size=8)
+
+    # ── UI builder ──────────────────────────────────────────
+    def _build_ui(self):
+        pad = dict(padx=20)
+
+        # ── header ──────────────────────────────────────────
+        hdr = tk.Frame(self.root, bg=BG_DARK)
+        hdr.pack(fill="x", padx=20, pady=(20, 0))
+
+        tk.Label(hdr, text="⬡  REPAIR AUTOMATION", font=self.f_title,
+                 bg=BG_DARK, fg=AMBER).pack(side="left")
+
+        self.clock_lbl = tk.Label(hdr, text="", font=self.f_badge,
+                                  bg=BG_DARK, fg=TEXT_SEC)
+        self.clock_lbl.pack(side="right", pady=4)
+        self._tick_clock()
+
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(10, 0))
+
+        # ── status badge ────────────────────────────────────
+        status_frame = tk.Frame(self.root, bg=BG_PANEL,
+                                highlightbackground=BORDER, highlightthickness=1)
+        status_frame.pack(fill="x", padx=20, pady=(16, 0))
+
+        inner = tk.Frame(status_frame, bg=BG_PANEL)
+        inner.pack(pady=18)
+
+        tk.Label(inner, text="STATUS", font=self.f_badge,
+                 bg=BG_PANEL, fg=TEXT_SEC).pack()
+
+        self.status_lbl = tk.Label(inner, text="READY", font=self.f_status,
+                                   bg=BG_PANEL, fg=GREEN)
+        self.status_lbl.pack()
+
+        # ── SN input ─────────────────────────────────────────
+        tk.Label(self.root, text="SERIAL NUMBER", font=self.f_badge,
+                 bg=BG_DARK, fg=TEXT_SEC, anchor="w").pack(fill="x", padx=20, pady=(16, 2))
+
+        entry_frame = tk.Frame(self.root, bg=AMBER, padx=2, pady=2)
+        entry_frame.pack(fill="x", padx=20)
+
+        self.sn_var   = tk.StringVar()
+        self.sn_entry = tk.Entry(
+            entry_frame,
+            textvariable=self.sn_var,
+            font=self.f_entry,
+            bg=BG_INPUT, fg=TEXT_PRI,
+            insertbackground=AMBER,
+            relief="flat",
+            bd=0
+        )
+        self.sn_entry.pack(fill="x", ipady=10, ipadx=12)
+        self.sn_entry.bind("<Return>", self._on_scan)
+        self.sn_entry.bind("<FocusOut>", lambda e: self.sn_entry.focus_set())
+
+        tk.Label(self.root, text="Scan barcode or type SN then press Enter",
+                 font=self.f_badge, bg=BG_DARK, fg=TEXT_SEC).pack(anchor="w", padx=20, pady=(4, 0))
+
+        # ── result row ───────────────────────────────────────
+        res_frame = tk.Frame(self.root, bg=BG_DARK)
+        res_frame.pack(fill="x", padx=20, pady=(14, 0))
+
+        tk.Label(res_frame, text="ERROR CODE", font=self.f_badge,
+                 bg=BG_DARK, fg=TEXT_SEC).pack(anchor="w")
+
+        self.result_lbl = tk.Label(res_frame, text="—", font=self.f_entry,
+                                   bg=BG_DARK, fg=TEXT_SEC, anchor="w")
+        self.result_lbl.pack(anchor="w")
+
+        # ── buttons ──────────────────────────────────────────
+        btn_row = tk.Frame(self.root, bg=BG_DARK)
+        btn_row.pack(fill="x", padx=20, pady=(14, 0))
+
+        self.reset_btn = tk.Button(
+            btn_row,
+            text="↺  RESET",
+            font=self.f_btn,
+            bg=BG_PANEL, fg=AMBER,
+            activebackground=AMBER_DIM, activeforeground=TEXT_PRI,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._reset,
+            padx=18, pady=8
+        )
+        self.reset_btn.pack(side="left")
+
+        self.run_btn = tk.Button(
+            btn_row,
+            text="▶  RUN",
+            font=self.f_btn,
+            bg=AMBER, fg=BG_DARK,
+            activebackground=AMBER_DIM, activeforeground=TEXT_PRI,
+            relief="flat", bd=0, cursor="hand2",
+            command=lambda: self._on_scan(None),
+            padx=18, pady=8
+        )
+        self.run_btn.pack(side="right")
+
+        # ── log panel ────────────────────────────────────────
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(16, 0))
+
+        log_header = tk.Frame(self.root, bg=BG_DARK)
+        log_header.pack(fill="x", padx=20, pady=(8, 0))
+
+        tk.Label(log_header, text="PROCESS LOG", font=self.f_badge,
+                 bg=BG_DARK, fg=TEXT_SEC).pack(side="left")
+
+        tk.Button(log_header, text="CLEAR", font=self.f_badge,
+                  bg=BG_DARK, fg=TEXT_SEC, relief="flat", bd=0,
+                  cursor="hand2", command=self._clear_log).pack(side="right")
+
+        log_frame = tk.Frame(self.root, bg=BG_PANEL,
+                             highlightbackground=BORDER, highlightthickness=1)
+        log_frame.pack(fill="both", expand=True, padx=20, pady=(4, 20))
+
+        self.log_text = tk.Text(
+            log_frame,
+            font=self.f_log,
+            bg=BG_PANEL, fg=TEXT_MONO,
+            insertbackground=AMBER,
+            relief="flat", bd=0,
+            state="disabled",
+            wrap="word",
+            padx=10, pady=8
+        )
+        self.log_text.pack(side="left", fill="both", expand=True)
+
+        scroll = tk.Scrollbar(log_frame, command=self.log_text.yview,
+                              bg=BG_PANEL, troughcolor=BG_PANEL,
+                              activebackground=BORDER, relief="flat", bd=0)
+        scroll.pack(side="right", fill="y")
+        self.log_text.config(yscrollcommand=scroll.set)
+
+        # tag colors สำหรับ log
+        self.log_text.tag_config("green",  foreground=GREEN)
+        self.log_text.tag_config("red",    foreground=RED_ERR)
+        self.log_text.tag_config("amber",  foreground=AMBER)
+        self.log_text.tag_config("dim",    foreground=TEXT_SEC)
+        self.log_text.tag_config("normal", foreground=TEXT_MONO)
+
+    # ── clock ────────────────────────────────────────────────
+    def _tick_clock(self):
+        self.clock_lbl.config(text=datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
+        self.root.after(1000, self._tick_clock)
+
+    # ── state helpers ────────────────────────────────────────
+    def _set_ready(self):
+        self.running = False
+        self.sn_entry.config(state="normal")
+        self.run_btn.config(state="normal", bg=AMBER)
+        self.reset_btn.config(state="normal")
+
+    def _set_busy(self):
+        self.running = True
+        self.sn_entry.config(state="disabled")
+        self.run_btn.config(state="disabled", bg=BORDER)
+        self.reset_btn.config(state="disabled")
+
+    # ── log helpers ──────────────────────────────────────────
+    def _log(self, message, color=None):
+        """thread-safe log append"""
+        def _write():
+            ts  = datetime.now().strftime("%H:%M:%S")
+            tag = {GREEN: "green", RED_ERR: "red", AMBER: "amber"}.get(color, "normal")
+
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", f"[{ts}]  ", "dim")
+            self.log_text.insert("end", f"{message}\n", tag)
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
+
+        self.root.after(0, _write)
+
+    def _clear_log(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
+    def _set_status(self, text, color=GREEN):
+        self.root.after(0, lambda: self.status_lbl.config(text=text, fg=color))
+
+    def _set_result(self, text, color=TEXT_SEC):
+        self.root.after(0, lambda: self.result_lbl.config(text=text, fg=color))
+
+    # ── actions ──────────────────────────────────────────────
+    def _on_scan(self, event):
+        if self.running:
+            return
+        sn = self.sn_var.get().strip()
+        if not sn:
+            self._log("No serial number entered", color=RED_ERR)
+            return
+
+        self._set_busy()
+        self._set_status("RUNNING...", AMBER)
+        self._set_result("—", TEXT_SEC)
+        self._log(f"── START ─────────────────────", color=AMBER)
+
+        def worker():
+            code = RunRepairProcess(
+                sn=sn,
+                log_fn=self._log,
+                status_fn=self._set_status,
+            )
+            if code:
+                self.root.after(0, lambda: self._set_result(code, RED_ERR))
+            else:
+                self.root.after(0, lambda: self._set_result("No error found", GREEN))
+
+            self.root.after(0, self._after_process)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_process(self):
+        """callback after process — clear SN and waiting next scan"""
+        self.sn_var.set("")
+        self._set_ready()
+        self.sn_entry.focus_set()
+        self._log("── DONE — ready for next scan ─", color=AMBER)
+
+    def _reset(self):
+        """reset to initial state"""
+        if self.running:
+            return
+        self.sn_var.set("")
+        self._clear_log()
+        self._set_status("READY", GREEN)
+        self._set_result("—", TEXT_SEC)
+        self.sn_entry.focus_set()
+        self._log("System reset", color=AMBER)
+
+
+# ============================================================
+#  ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app  = RepairGUI(root)
+    root.mainloop()

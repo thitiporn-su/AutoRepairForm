@@ -351,9 +351,12 @@ def FillRepairForm(main_form, data, log_fn=None):
         keyboard.send_keys("{ENTER}") # ยืนยันการเลือก
         
         # 4. เลื่อนไปฟิลด์ถัดไป (Failure Code) โดยใช้ TAB
-        keyboard.send_keys("{TAB}")
+        keyboard.send_keys("{TAB 2}")
         time.sleep(0.2)
         keyboard.write(str(data.get("failure_code", "")))
+        keyboard.send_keys("{TAB 3}")
+        time.sleep(0.2)
+        keyboard.write(str(data.get("location_code", "")))
 
         # 5. กรอกฟิลด์อื่นๆ ตามลำดับในหน้าจอ (ใช้ TAB ไล่ไปเรื่อยๆ)
         # Location Code, Reason Code, Handling ฯลฯ
@@ -500,6 +503,7 @@ def SelectPhenomenon(repair_win_handle, value):
 def FillLocationCode(repair_win_handle, location_code):
     try:
         location_code = str(location_code).strip()
+
         if not location_code:
             print("[INFO] Location Code is empty, skipping")
             return True
@@ -508,7 +512,7 @@ def FillLocationCode(repair_win_handle, location_code):
         form.set_focus()
         time.sleep(0.2)
 
-        for _ in range(5):
+        for _ in range(3):
             keyboard.send_keys("{TAB}")
             time.sleep(0.1)
 
@@ -520,6 +524,32 @@ def FillLocationCode(repair_win_handle, location_code):
 
     except Exception as e:
         print(f"[ERROR] FillLocationCode failed: {e}")
+        return False
+
+
+def FillFailureCode(repair_win_handle, failure_code):
+    try:
+        failure_code = str(failure_code).strip()
+
+        if not failure_code:
+            print("[INFO] Failure Code is empty, skipping")
+            return True
+
+        form = Desktop(backend="uia").window(handle=repair_win_handle.handle)
+        form.set_focus()
+        time.sleep(0.2)
+
+        keyboard.send_keys(failure_code, with_spaces=True)
+        keyboard.send_keys("{TAB}")
+
+        keyboard.send_keys(failure_code, with_spaces=True)
+        time.sleep(0.1)
+        keyboard.send_keys("{TAB}")
+        print(f"[INFO] Filled Failure Code: '{failure_code}'")
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] FillFailureCode failed: {e}")
         return False
 
 
@@ -538,9 +568,11 @@ def GetFirstRedErrorCode(main_form, form_data):
     code = None
     found_red_row = False
     phenomenon_value = ""
+    failure_code = ""
     location_code = ""
     if form_data:
         phenomenon_value = str(form_data.get("phenomenon", "")).strip()
+        failure_code = str(form_data.get("failure_code", "")).strip()
         location_code = str(form_data.get("location_code", "")).strip()
 
     target_grid = FindErrorCodeDBGrid(main_form)
@@ -604,6 +636,7 @@ def GetFirstRedErrorCode(main_form, form_data):
             repair_win = WaitForRepairWindow(timeout=5)
             if repair_win:
                 SelectPhenomenon(repair_win, phenomenon_value)
+                FillFailureCode(repair_win, failure_code)
                 FillLocationCode(repair_win, location_code)
                 rapp = Application(backend="uia").connect(handle=repair_win.handle)
                 rform = rapp.window(handle=repair_win.handle)

@@ -406,87 +406,8 @@ def ClickInputNextToLabel(win_rect, label_box, img, log_fn=print):
     time.sleep(0.15)
     return True
 
-def FillRepairWindowByOCR(excel_data, log_fn=print):
-    """
-    Main function: OCR the Repair Window, locate each field, fill it.
-    """
-    time.sleep(0.8)
 
-    try:
-        repair_win, win_rect = GetRepairWindowRect()
-    except Exception as e:
-        log_fn(f"Repair Window not found: {e}")
-        return False
-
-    img = CaptureWindow(win_rect)
-    img.save("debug_repair_window.png")   # inspect this if something goes wrong
-
-    label_positions = FindLabelPositions(img)
-    log_fn(f"OCR found labels: {list(label_positions.keys())}")
-
-    # Map what we found → what value to fill
-    # Key = substring that OCR would find in the label text
-    fill_map = [
-        ("Phenomenon",   excel_data.get("phenomenon",    "")),
-        ("Failure",      excel_data.get("failure_code",  "")),   # first Failure row = Failure Code
-        ("Location",     excel_data.get("location_code", "")),
-        ("Duty",         excel_data.get("duty_code",     "")),
-        ("Reason",       excel_data.get("reason_code",   "")),
-        ("Handling",     excel_data.get("handling",      "")),
-    ]
-
-    for label_key, value in fill_map:
-        if not value or str(value) == "nan":
-            log_fn(f"  Skipping '{label_key}' (no value)")
-            continue
-
-        if label_key not in label_positions:
-            log_fn(f"  Label not found by OCR: {label_key}")
-            continue
-
-        label_box = label_positions[label_key]
-        log_fn(f"  Filling '{label_key}' = {value}")
-
-        clicked = ClickInputNextToLabel(win_rect, label_box, img, log_fn)
-        if clicked:
-            keyboard.send_keys("^a", pause=0.05)
-            keyboard.send_keys(str(value), with_spaces=True, pause=0.03)
-            keyboard.send_keys("{TAB}", pause=0.2)
-            log_fn(f"  ✓ Filled '{label_key}'", )
-        else:
-            log_fn(f"  ✗ Could not click input for '{label_key}'")
-
-    log_fn("OCR fill complete")
-    return True
-
-def FillRepairForm(main_form, data, log_fn):
-    """
-    Fills the Phenomenon, Failure Code, and Location fields 
-    based on the Excel data provided.
-    """
-    try:
-        # 1. Fill Phenomenon (Usually a TDBComboBox or TDBEdit)
-        # Search by the label 'Phenomenon' or nearby index
-        phenom_field = main_form.child_window(class_name="TDBEdit", found_index=2) # Adjust index based on UI
-        phenom_field.set_edit_text(data['phenomenon'])
-        log_fn(f"Filled Phenomenon: {data['phenomenon']}")
-
-        # 2. Fill Failure Code
-        fail_code_field = main_form.child_window(class_name="TDBEdit", found_index=3)
-        fail_code_field.set_edit_text(data['failure_code'])
-        log_fn(f"Filled Failure Code: {data['failure_code']}")
-
-        # 3. Fill Location Code
-        loc_field = main_form.child_window(class_name="TDBEdit", found_index=4)
-        loc_field.set_edit_text(data['location_code'])
-        log_fn(f"Filled Location: {data['location_code']}")
-
-        # 4. Fill Reason/Handling if necessary
-        # handle_field = main_form.child_window(class_name="TDBMemo") # Handling is often a Memo
-        # handle_field.set_text(data['handling'])
-
-    except Exception as e:
-        log_fn(f"Filling Error: {e}", color="#ff4f4f")
+    
 
 
 # ============================================================

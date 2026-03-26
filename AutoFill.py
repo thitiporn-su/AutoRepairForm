@@ -4,16 +4,16 @@ import threading
 import time
 import ctypes
 import PIL.ImageGrab
-
+import numpy as np
 from PIL import ImageGrab
 from datetime import datetime
-from pywinauto import Application, Desktop, mouse
+from pywinauto import Application, Desktop, mouse, keyboard
+from FillRepair import FillRepairWindowByPixel
+import pytesseract
+
 import ctypes
-ctypes.windll.shcore.SetProcessDpiAwareness(1)
-try:
-    import ReadData
-except ImportError:
-    ReadData = None
+import ReadData
+
 
 
 # ============================================================
@@ -175,61 +175,218 @@ def FindErrorCodeEdit(main_form):
         return all_dbedits[1]
     return None
 
-def GetFirstRedErrorCode(main_form):
-    # 1. Find the specific "Error Code List" grid (TDBGrid)
-    target_grid = FindErrorCodeDBGrid(main_form)
-    if not target_grid: 
-        return None
+def ClickAddRepairButton(main_form, log_fn=None):
+    """
+    ใช้ pywinauto ค้นหาและคลิกปุ่ม Add โดยตรง 
+    ไม่ต้องสแกนสีพิกเซล เพื่อความแม่นยำสูงสุด
+    """
+    try:
+        # 1. ค้นหาปุ่มที่มีคำว่า "Add" (จากรูปที่คุณส่งมา ปุ่มชื่อ Add และมีเครื่องหมายบวก)
+        # เราหาจาก descendants ที่เป็น Class TBitBtn (มาตรฐานของ Delphi)
+        btn_new = None
+        for ctrl in main_form.descendants():
+            if ctrl.class_name() == "TBitBtn" and "Add" in ctrl.window_text():
+                btn_new = ctrl
+                break
+        
+        if btn_new:
+            # ใช้ click_input() เพื่อจำลองการคลิกเมาส์จริงที่ตัวปุ่ม
+            btn_new.click_input()
+            if log_fn: log_fn("Successfully clicked 'Add' button", color="#3ddc84")
+            return True
+        else:
+            if log_fn: log_fn("Could not find 'Add' button", color="#ff4f4f")
+            return False
 
-    # 2. Get the screen coordinates of just this grid
-    rect = target_grid.rectangle()
+    except Exception as e:
+        if log_fn: log_fn(f"Error clicking Add button: {str(e)}", color="#ff4f4f")
+        return False
+
+def GetFirstRedErrorCode(main_form, log_fn=None):
+    # 1. Get the App window's current position on the screen
+    app_rect = main_form.rectangle()
     
-    # 3. Use PIL.ImageGrab on only this Bounding Box (bbox)
-    # Note: We add a small margin to avoid the grid borders
-    img = PIL.ImageGrab.grab(bbox=(
-        rect.left + 5, 
-        rect.top,  # Skip the "Error Code" header
-        rect.right - 20, # Skip scrollbar
-        rect.bottom - 5
-    ))
-    img.save("debug_grid_only.png") # Check this; it should be just the list
+    # 2. Calculate the total width of the window
+    app_w = app_rect.right - app_rect.left
+    
+    # 3. Define the Bounding Box (L, T, R, B)
+    # We start at the left edge and end 40% of the way across
+    capture_bbox = (
+        app_rect.left + 5,      # เริ่มจากขอบซ้ายของหน้าต่างจริงๆ
+        app_rect.top + 100,     # หลบ Header ของโปรแกรม
+        app_rect.left + 250,    # แคปเฉพาะแถบแคบๆ ทางซ้ายที่แสดง Error Code
+        app_rect.bottom - 5
+    )                  # [BOTTOM] Go to the bottom edge
 
-    width, height = img.size
+    
+    # 4. Grab the image (This is ONLY the left 40% of the app)
+    img = PIL.ImageGrab.grab(bbox=capture_bbox)
+    img.save("red_detect.png") 
+    
+    # 5. Scan the pixels in this "Left Side" image
+    img_w, img_h = img.size
     pixels = img.load()
+    found_pos_local = None
 
-    # 4. Scan the small image for red background
-    for y in range(0, height, 5):
-        for x in range(0, width, 5):
+    # Scan bottom-to-top for the Red row
+    for y in range(0, img_h, 3):
+        for x in range(0, img_w, 5):
             r, g, b = pixels[x, y][:3]
-            
-            # Bright Red Detection (Matches F561 row in your image)
+            # Red detection (F561 color)
             if r > 200 and g < 60 and b < 60:
-                # Calculate screen position to move mouse and click
-                screen_x = rect.left + 5 + x
-                screen_y = rect.top + 30 + y
-                
-                # Step A: Move and Click the red row
-                mouse.move(coords=(screen_x, screen_y))
-                time.sleep(0.1)
-                mouse.click(button='left', coords=(screen_x, screen_y))
-                
-                # Step B: Click the "Add" button
-                time.sleep(0.5)
-                try:
-                    btn_add = main_form.child_window(title="Add", class_name="TBitBtn")
-                    btn_add.click()
-                except:
-                    pass
-                
-                # Step C: Extract the dynamic code (F561) from the Edit field
-                for edit in main_form.descendants(class_name="TDBEdit"):
-                    val = edit.window_text().strip()
-                    if val and val != "N/A" and not (val.isdigit() and len(val) == 12):
-                        return val
-                return "RED_FOUND"
+                found_pos_local = (x, y)
+                break
+        if found_pos_local: break
+
+    # 6. Click the row if found
+    if found_pos_local:
+        screen_x = capture_bbox[0] + found_pos_local[0]
+        screen_y = capture_bbox[1] + found_pos_local[1] + 10 #ship to click RED
+
+        if log_fn: log_fn(f"Targeted RED row at {screen_x}, {screen_y}")
+        time.sleep(0.3)  # small delay before click
+        mouse.click(button='left', coords=(screen_x, screen_y))
+        ClickAddRepairButton(main_form, log_fn)
+        return (screen_x, screen_y)
 
     return None
 
+def FillRepairWindow(excel_data, log_fn):
+    """
+    Finds the newly opened 'Repair Window' dialog and fills all fields.
+    Must be called AFTER clicking the Add button and waiting for the dialog.
+    """
+    time.sleep(1.0)  # Wait for Repair Window to fully open
+
+    # --- 1. Find the Repair Window (separate top-level window) ---
+    try:
+        repair_win = Desktop(backend="win32").window(title="Repair Window")
+        repair_win.wait("visible", timeout=10)
+        repair_win.set_focus()
+        log_fn("Found Repair Window")
+    except Exception as e:
+        log_fn(f"Cannot find Repair Window: {e}", color="#ff4f4f")
+        return False
+
+    # --- 2. Map field labels to their values ---
+    field_map = {
+        "Phenomenon":   excel_data.get("phenomenon", ""),
+        "Failure Code": excel_data.get("failure_code", ""),
+        "Location Code":excel_data.get("location_code", ""),
+        "Duty Code":    excel_data.get("duty_code", ""),
+        "Reason Code":  excel_data.get("reason_code", ""),
+        "Handling":     excel_data.get("handling", ""),
+    }
+
+    # --- 3. Fill each field by clicking it directly ---
+    for label_text, value in field_map.items():
+        if not value or value == "nan":
+            continue
+        try:
+            _fill_field_by_label(repair_win, label_text, value, log_fn)
+        except Exception as e:
+            log_fn(f"Failed to fill '{label_text}': {e}", color="#f5a623")
+
+    log_fn("All fields filled in Repair Window", color="#3ddc84")
+    return True
+
+
+def _fill_field_by_label(window, label_text, value, log_fn):
+    """
+    Smart fill:
+    - Dropdown (Phenomenon, etc.) → select from list
+    - Textbox (Location Code) → type
+    - Skip Failure Code (FC)
+    """
+
+    if not value or str(value).strip().lower() == "nan":
+        return
+
+    value = str(value).strip()
+
+    # ❌ Skip Failure Code (fc)
+    if "failure" in label_text.lower():
+        log_fn(f"  Skip '{label_text}' (handled separately)")
+        return
+
+    # --- Find label ---
+    label = None
+    for ctrl in window.descendants():
+        try:
+            if ctrl.texts() and ctrl.texts()[0].strip().lower() == label_text.lower():
+                label = ctrl
+                break
+        except:
+            pass
+
+    if not label:
+        log_fn(f"Label not found: {label_text}", color="#f5a623")
+        return
+
+    label_rect = label.rectangle()
+
+    # --- Find input next to label ---
+    candidates = []
+    for ctrl in window.descendants():
+        try:
+            cn = ctrl.class_name()
+            if cn not in (
+                "TDBEdit", "TEdit",
+                "TDBComboBox", "TComboBox", "TDBLookupComboBox",
+                "TDBMemo"
+            ):
+                continue
+
+            r = ctrl.rectangle()
+
+            if abs(r.top - label_rect.top) < 20 and r.left > label_rect.left:
+                candidates.append((r.left, ctrl))
+        except:
+            pass
+
+    if not candidates:
+        log_fn(f"No input found for '{label_text}'", color="#f5a623")
+        return
+
+    candidates.sort(key=lambda x: x[0])
+    ctrl = candidates[0][1]
+
+    ctrl.click_input()
+    time.sleep(0.2)
+
+    ctrl_class = ctrl.class_name()
+
+    # =========================================================
+    # 🎯 DROPDOWN (Phenomenon)
+    # =========================================================
+    if ctrl_class in ("TDBComboBox", "TComboBox", "TDBLookupComboBox"):
+
+        log_fn(f"  Dropdown detected: {label_text}")
+
+        # Open dropdown
+        keyboard.send_keys("%{DOWN}")
+        time.sleep(0.3)
+
+        # Try typing to jump to item
+        keyboard.send_keys(value, with_spaces=True, pause=0.03)
+        time.sleep(0.2)
+
+        # Confirm
+        keyboard.send_keys("{ENTER}")
+        keyboard.send_keys("{TAB}")
+
+    # =========================================================
+    # ✏️ TEXT INPUT (Location Code)
+    # =========================================================
+    else:
+        keyboard.send_keys("^a")
+        keyboard.send_keys("{BACKSPACE}")
+        time.sleep(0.05)
+
+        keyboard.send_keys(value, with_spaces=True, pause=0.03)
+        keyboard.send_keys("{TAB}")
+
+    log_fn(f"  Filled '{label_text}' = {value}")
 
 
 def RunRepairProcess(sn, log_fn, status_fn):
@@ -290,6 +447,182 @@ def RunRepairProcess(sn, log_fn, status_fn):
         log_fn(f"[EXCEPTION] {e}", color=RED_ERR)
         status_fn("FAILED", RED_ERR)
         return None
+
+def GetRepairWindowRect():
+    """Get the bounding rect of the Repair Window."""
+    repair_win = Desktop(backend="win32").window(title="Repair Window")
+    repair_win.wait("visible", timeout=10)
+    repair_win.set_focus()
+    time.sleep(0.3)
+    r = repair_win.rectangle()
+    return repair_win, r
+
+def CaptureWindow(rect):
+    """Screenshot just the Repair Window."""
+    img = PIL.ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom))
+    return img
+
+def FindLabelPositions(img):
+    """
+    Use pytesseract to get word positions.
+    Returns dict: { "Phenomenon": (x, y, w, h), ... }  -- coords relative to image
+    """
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    
+    labels_to_find = [
+        "Phenomenon",
+        "Failure",      # matches "Failure Code" and "Failure Desc"
+        "Location",
+        "Duty",
+        "Reason",
+        "Handling",
+        "LinkMonumber",
+        "Part",
+        "Vendor",
+        "Defect",
+        "Root",
+    ]
+    
+    found = {}
+    n = len(data["text"])
+    
+    for i in range(n):
+        word = data["text"][i].strip()
+        if not word:
+            continue
+        for label in labels_to_find:
+            if word.lower() in label.lower() or label.lower().startswith(word.lower()):
+                x = data["left"][i]
+                y = data["top"][i]
+                w = data["width"][i]
+                h = data["height"][i]
+                # Use first match only
+                if label not in found:
+                    found[label] = (x, y, w, h)
+    
+    return found
+
+def ClickInputNextToLabel(win_rect, label_box, img, log_fn=print):
+    """
+    Given a label bounding box (relative to window screenshot),
+    click the INPUT FIELD that sits to its right on the same row.
+    
+    Strategy: scan the image pixels to the right of the label
+    looking for a white/light-yellow rectangle (input field).
+    """
+    lx, ly, lw, lh = label_box
+    img_w, img_h = img.size
+    pixels = img.load()
+
+    # Search rightward from end of label, on the same vertical band
+    search_y_center = ly + lh // 2
+    search_y_range  = range(max(0, search_y_center - 4), min(img_h, search_y_center + 4))
+
+    input_x = None
+    for x in range(lx + lw + 5, min(img_w, lx + lw + 300)):
+        for y in search_y_range:
+            r, g, b = pixels[x, y][:3]
+            # Input fields are white or light yellow (Delphi default)
+            if r > 220 and g > 220 and b > 180:
+                input_x = x
+                break
+        if input_x:
+            break
+
+    if input_x is None:
+        log_fn(f"  Could not find input field to the right of label")
+        return False
+
+    # Convert image-relative coords → screen coords
+    screen_x = win_rect.left + input_x + 10   # +10 to land inside the field
+    screen_y = win_rect.top
+
+    from pywinauto import mouse
+    mouse.click(button="left", coords=(screen_x, screen_y))
+    time.sleep(0.15)
+    return True
+
+def FillRepairWindowByOCR(excel_data, log_fn=print):
+    """
+    Main function: OCR the Repair Window, locate each field, fill it.
+    """
+    time.sleep(0.8)
+
+    try:
+        repair_win, win_rect = GetRepairWindowRect()
+    except Exception as e:
+        log_fn(f"Repair Window not found: {e}")
+        return False
+
+    img = CaptureWindow(win_rect)
+    img.save("debug_repair_window.png")   # inspect this if something goes wrong
+
+    label_positions = FindLabelPositions(img)
+    log_fn(f"OCR found labels: {list(label_positions.keys())}")
+
+    # Map what we found → what value to fill
+    # Key = substring that OCR would find in the label text
+    fill_map = [
+        ("Phenomenon",   excel_data.get("phenomenon",    "")),
+        ("Failure",      excel_data.get("failure_code",  "")),   # first Failure row = Failure Code
+        ("Location",     excel_data.get("location_code", "")),
+        ("Duty",         excel_data.get("duty_code",     "")),
+        ("Reason",       excel_data.get("reason_code",   "")),
+        ("Handling",     excel_data.get("handling",      "")),
+    ]
+
+    for label_key, value in fill_map:
+        if not value or str(value) == "nan":
+            log_fn(f"  Skipping '{label_key}' (no value)")
+            continue
+
+        if label_key not in label_positions:
+            log_fn(f"  Label not found by OCR: {label_key}")
+            continue
+
+        label_box = label_positions[label_key]
+        log_fn(f"  Filling '{label_key}' = {value}")
+
+        clicked = ClickInputNextToLabel(win_rect, label_box, img, log_fn)
+        if clicked:
+            keyboard.send_keys("^a", pause=0.05)
+            keyboard.send_keys(str(value), with_spaces=True, pause=0.03)
+            keyboard.send_keys("{TAB}", pause=0.2)
+            log_fn(f"  ✓ Filled '{label_key}'", )
+        else:
+            log_fn(f"  ✗ Could not click input for '{label_key}'")
+
+    log_fn("OCR fill complete")
+    return True
+
+def FillRepairForm(main_form, data, log_fn):
+    """
+    Fills the Phenomenon, Failure Code, and Location fields 
+    based on the Excel data provided.
+    """
+    try:
+        # 1. Fill Phenomenon (Usually a TDBComboBox or TDBEdit)
+        # Search by the label 'Phenomenon' or nearby index
+        phenom_field = main_form.child_window(class_name="TDBEdit", found_index=2) # Adjust index based on UI
+        phenom_field.set_edit_text(data['phenomenon'])
+        log_fn(f"Filled Phenomenon: {data['phenomenon']}")
+
+        # 2. Fill Failure Code
+        fail_code_field = main_form.child_window(class_name="TDBEdit", found_index=3)
+        fail_code_field.set_edit_text(data['failure_code'])
+        log_fn(f"Filled Failure Code: {data['failure_code']}")
+
+        # 3. Fill Location Code
+        loc_field = main_form.child_window(class_name="TDBEdit", found_index=4)
+        loc_field.set_edit_text(data['location_code'])
+        log_fn(f"Filled Location: {data['location_code']}")
+
+        # 4. Fill Reason/Handling if necessary
+        # handle_field = main_form.child_window(class_name="TDBMemo") # Handling is often a Memo
+        # handle_field.set_text(data['handling'])
+
+    except Exception as e:
+        log_fn(f"Filling Error: {e}", color="#ff4f4f")
 
 
 # ============================================================

@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
-def GetFormData():
+def GetFormData(scanned_barcode):
     OUTPUT_COLUMN_MAP = {
         "phenomenon": "Pheomenon",
         "failure_code": "Failure Code",
@@ -20,43 +20,29 @@ def GetFormData():
         df.columns = [str(column).strip() for column in df.columns]
 
         if df.empty:
-            print("Data.xlsx has no data rows.")
-            raise SystemExit
+            return None
 
-        missing_columns = [
-            column_name for column_name in OUTPUT_COLUMN_MAP.values()
-            if column_name not in df.columns
-        ]
-
-        if missing_columns:
-            print("Missing columns in Data.xlsx:")
-            for column in missing_columns:
-                print(f"- {column}")
-            raise SystemExit
-
-        scanned_barcode = input("Scan Barcode: ").strip()
-        # 25JF595448007P
-
+        # ดึงแถวแรกมาใช้งาน (หรือจะเขียน Logic ค้นหาตามเงื่อนไขอื่นก็ได้)
         row = df.iloc[0]
+        
         form_data = {
             "serial_number": scanned_barcode,
-            "phenomenon": row["Pheomenon"],
-            "failure_code": row["Failure Code"],
-            "failure_desc": row["Failure Desc"],
-            "location_code": row["Location Code"],
-            "duty_code": row["Duty Code"],
-            "reason_code": row["Reason Code"],
-            "handling": row["Handling"],
-            "duty_department": row["Duty Department"],
+            "phenomenon": str(row["Pheomenon"]),
+            "failure_code": str(row["Failure Code"]),
+            "failure_desc": str(row["Failure Desc"]),
+            "location_code": str(row["Location Code"]),
+            "duty_code": str(row["Duty Code"]),
+            "reason_code": str(row["Reason Code"]),
+            "handling": str(row["Handling"]),
+            "duty_department": str(row["Duty Department"]),
         }
-
-        print(form_data)
         return form_data
 
-    except PermissionError:
-        print("Close Excel and try again.")
+    except Exception as e:
+        print(f"Error reading Excel: {e}")
         return None
 
 
 if __name__ == "__main__":
     print(GetFormData())
+    # 25JF595448007P

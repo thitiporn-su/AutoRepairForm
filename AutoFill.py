@@ -79,8 +79,6 @@ def CheckPythonBitness():
 
         print(f"[INFO] Python {bits}-bit — OK")
  
-
-
 # ============================================================
 #  DPI / COLOR HELPERS
 # ============================================================
@@ -252,7 +250,6 @@ def GetFirstRedErrorCode(main_form, log_fn=None):
     return None
 
 
-
 def RunRepairProcess(sn, log_fn, status_fn):
     try:
         status_fn("SCANNING", AMBER)
@@ -326,45 +323,6 @@ def CaptureWindow(rect):
     img = PIL.ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom))
     return img
 
-def FindLabelPositions(img):
-    """
-    Use pytesseract to get word positions.
-    Returns dict: { "Phenomenon": (x, y, w, h), ... }  -- coords relative to image
-    """
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-    
-    labels_to_find = [
-        "Phenomenon",
-        "Failure",      # matches "Failure Code" and "Failure Desc"
-        "Location",
-        "Duty",
-        "Reason",
-        "Handling",
-        "LinkMonumber",
-        "Part",
-        "Vendor",
-        "Defect",
-        "Root",
-    ]
-    
-    found = {}
-    n = len(data["text"])
-    
-    for i in range(n):
-        word = data["text"][i].strip()
-        if not word:
-            continue
-        for label in labels_to_find:
-            if word.lower() in label.lower() or label.lower().startswith(word.lower()):
-                x = data["left"][i]
-                y = data["top"][i]
-                w = data["width"][i]
-                h = data["height"][i]
-                # Use first match only
-                if label not in found:
-                    found[label] = (x, y, w, h)
-    
-    return found
 
 def ClickInputNextToLabel(win_rect, label_box, img, log_fn=print):
     """
@@ -405,10 +363,6 @@ def ClickInputNextToLabel(win_rect, label_box, img, log_fn=print):
     mouse.click(button="left", coords=(screen_x, screen_y))
     time.sleep(0.15)
     return True
-
-
-    
-
 
 # ============================================================
 #  GUI

@@ -134,11 +134,8 @@ def GrabWindow(hwnd, rect=None):
 # ============================================================
 def is_red_bg(r, g, b):
     """
-    Dynamic red detection — ไม่ hardcode threshold
-    ใช้ HSV-style ratio แทน absolute value
-    รองรับ gamma/color profile ต่างกันทุกจอ
+    Dynamic red detection
     """
-    # แดงต้องสว่างพอ (ไม่ใช่ดำ)
     if r < 80:
         return False
     total = r + g + b

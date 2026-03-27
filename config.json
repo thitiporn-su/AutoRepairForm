@@ -1,0 +1,9 @@
+{
+    "PHENOMENON_VALUE": "Appearance",
+    "FAILURE_CODE": "F142",
+    "LOCATION": "C500",
+    "DUTY_CODE": "Process",
+    "REASON_CODE": "SOLDERING--SOLDERING",
+    "HANDLING": "Touchup",
+    "DUTY_DEPARTMENT": "ME"
+}

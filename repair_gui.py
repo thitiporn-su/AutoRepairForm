@@ -71,11 +71,15 @@ TEXT_SEC  = "#6b7280"
 TEXT_MONO = "#a8b0c0"
 BLUE      = "#4ea8f5"
 
-
 # ============================================================
 #  DPI HELPER
 # ============================================================
+
 def GetDPI():
+    ''' 
+    Get screen resolution and 96 is default DPI (100% scaling) 
+    
+    '''
     try:
         hdc = ctypes.windll.user32.GetDC(0)
         dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
@@ -88,6 +92,7 @@ def GetDPI():
 # ============================================================
 #  GRAB WINDOW
 # ============================================================
+
 def GrabWindow(hwnd, rect=None):
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     win_w = right  - left
@@ -142,17 +147,16 @@ def is_red_bg(r, g, b):
     if total < 100:
         return False
 
-    # red channel ต้องครอง % สูงสุด
     r_ratio = r / total
-    if r_ratio < 0.50:          # แดงต้องเป็น 50%+ ของสี
+    if r_ratio < 0.50:          
         return False
-    if g / total > 0.30:        # เขียวต้องน้อย
+    if g / total > 0.30:       
         return False
-    if b / total > 0.30:        # น้ำเงินต้องน้อย
+    if b / total > 0.30:      
         return False
-    if r < g + 30:              # แดงต้องมากกว่าเขียวชัดเจน
+    if r < g + 30:           
         return False
-    if r < b + 30:              # แดงต้องมากกว่าน้ำเงินชัดเจน
+    if r < b + 30:           
         return False
 
     return True

@@ -94,6 +94,11 @@ def GetDPI():
 # ============================================================
 
 def GrabWindow(hwnd, rect=None):
+    '''
+    Capture image relative to window and DPI scaling needs to be 100%
+
+    '''
+    # absolute window rect
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     win_w = right  - left
     win_h = bottom - top
@@ -121,8 +126,7 @@ def GrabWindow(hwnd, rect=None):
     win32gui.ReleaseDC(hwnd, hwnd_dc)
 
     if rect is not None:
-        # ── relative crop จาก window ──────────────────────────
-        # ไม่ใช้ absolute screen coord แต่ใช้ offset จาก window เอง
+        # relative to window
         crop_l = max(rect.left  - left, 0)
         crop_t = max(rect.top   - top,  0)
         crop_r = min(rect.right - left, win_w)
@@ -138,9 +142,10 @@ def GrabWindow(hwnd, rect=None):
 #  COLOR HELPER
 # ============================================================
 def is_red_bg(r, g, b):
-    """
+    '''
     Dynamic red detection
-    """
+
+    '''
     if r < 80:
         return False
     total = r + g + b
@@ -165,7 +170,13 @@ def is_red_bg(r, g, b):
 # ============================================================
 #  WINDOW HELPERS
 # ============================================================
+
 def WaitForMainForm(timeout=10):
+    '''
+    Detect the main form (TfrmMain) that appears after clicking Repair
+    Note : TfrmMain is the main form class in Repair-Rev where the error code grid is located
+    
+    '''
     start = time.time()
     while time.time() - start < timeout:
         for w in Desktop(backend="win32").windows(title_re=r"^Repair-Rev"):
@@ -189,6 +200,13 @@ def WaitForRepairWindow(timeout=10):
 #  FIND CONTROLS
 # ============================================================
 def FindErrorCodeDBGrid(main_form):
+
+    '''
+    Finds all TDBGrid and use heuristics button to identify the correct grid.
+    Note : TDBGrid is the grid class used in Repair-Rev to display error codes, but there may be multiple grids for different purposes.
+    
+    '''
+
     all_grids = []
     for child in main_form.descendants():
         try:
@@ -216,6 +234,11 @@ def FindErrorCodeDBGrid(main_form):
 
 
 def FindErrorCodeEdit(main_form):
+    '''
+    Finds TDBEdit that likely contains the error code after clicking the red row by textstart or length of text.
+    Note : TDBEdit is used to display and edit a specific database field through a textbox UI.
+
+    '''
     all_edits = []
     for child in main_form.descendants():
         try:
@@ -246,6 +269,11 @@ def FindErrorCodeEdit(main_form):
 #  REPAIR WINDOW ACTIONS
 # ============================================================
 def SelectPhenomenon(repair_win_handle, value):
+    '''
+    Select the phenomenon from the dropdown in the Repair Window by detecting first char.
+    Note : TComboBox is a dropdown list combined with a text box.
+
+    '''
     try:
         app = Desktop(backend="win32")
         form = app.window(handle=repair_win_handle.handle)
@@ -294,11 +322,10 @@ def SelectPhenomenon(repair_win_handle, value):
         return False
 
 def GetPanelEdits(form):
-    """
-    แยก TEdit ตาม Panel จริงๆ โดยใช้ left coordinate
-    - Panel บน  (Failure Code / Failure Desc) → left ≈ 2614
-    - Panel กลาง (LinkMonumber / Location / Part No.) → left ≈ 2610
-    """
+    '''
+    Find all visible TEdit fields on the left side of the form and return them sorted from top to bottom.
+    
+    '''
     form_rect = form.rectangle()
     form_mid  = form_rect.left + (form_rect.right - form_rect.left) // 2
 
@@ -323,8 +350,12 @@ def GetPanelEdits(form):
 
 
 def FocusFailureCode(form):
+    '''
+    Set focus on the 'Failure Code' edit field.
+    
+    '''
     edits = GetPanelEdits(form)
-    # index 0 = Failure Code (top น้อยสุด)
+    # index 0 = Failure Code
     if edits:
         edits[0].click_input()
         return edits[0]
@@ -332,8 +363,12 @@ def FocusFailureCode(form):
 
 
 def FocusLocationCode(form):
+    '''
+    Set focus on the 'Location Code' edit field.
+
+    '''
     edits = GetPanelEdits(form)
-    # index 3 = Location Code (ข้าม Failure Code, Failure Desc, LinkMonumber)
+    # index 3 = Location Code (skip Failure Code, Failure Desc, LinkMonumber)
     if len(edits) >= 4:
         edits[3].click_input()
         return edits[3]
@@ -341,6 +376,10 @@ def FocusLocationCode(form):
 
 
 def FillDutyCombos(form, duty_code, reason_code, handling, duty_department, log_fn):
+    '''
+    Fill the duty-related combo boxes with the provided values.
+    
+    '''
     targets = []
     for c in form.descendants():
         try:
@@ -381,6 +420,10 @@ def FillDutyCombos(form, duty_code, reason_code, handling, duty_department, log_
                 log_fn(f"  │  └ ✗ Failed: {e}", RED_ERR)
 
 def ClickOK(form):
+    '''
+    Click the OK button on the form.
+    
+    '''
     try:
         form.child_window(title="OK", class_name="TBitBtn").click()
         time.sleep(0.3)
@@ -395,6 +438,10 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn,
                          failure_code, location,
                          duty_code, reason_code, handling, duty_department,
                          log_fn, status_fn):
+    '''
+    UI flow to detect red row, click it, read error code, open Repair Window, fill details, and submit.
+    
+    '''
 
     code          = None
     found_red_row = False
@@ -554,6 +601,10 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn,
 #  MAIN PROCESS
 # ============================================================
 def RunRepairProcess(sn, log_fn, status_fn):
+    '''
+    Main process to run the repair workflow.
+    
+    '''
     try:
         cfg = LoadConfig()
         phenomenon_value = cfg.get("PHENOMENON_VALUE", "Appearance")
@@ -658,6 +709,12 @@ def RunRepairProcess(sn, log_fn, status_fn):
 #  GUI
 # ============================================================
 class RepairGUI:
+    '''
+    A simple GUI for the repair automation process. 
+    It allows the user to input a serial number, run the detection process, 
+    and see logs and status updates in real time. 
+    
+    '''
     def __init__(self, root):
         self.root = root
         self.root.title("Repair Automation")

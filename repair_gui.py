@@ -2,6 +2,7 @@ import ctypes
 import sys
 import json
 import os
+import traceback
 
 def SetDPIAware():
     try:
@@ -430,6 +431,55 @@ def ClickOK(form):
     except Exception as e:
         raise
 
+def ClickFinish(main_form, log_fn):
+    try:
+        log_fn("· Waiting for Repair Window to close...", BLUE)
+        start = time.time()
+        while time.time() - start < 5:
+            wins = Desktop(backend="win32").windows(title_re=r"^Repair Window")
+            if not wins:
+                break
+            time.sleep(0.3)
+        log_fn("✓ Repair Window closed", GREEN)
+
+        # ── หา Finish ทุกตัว แล้วเลือกตัวที่ visible+enabled ──
+        all_finish = []
+        for c in main_form.descendants():
+            try:
+                if (c.class_name() == "TBitBtn" and
+                        c.texts()[0] == "Finish"):
+                    r = c.rectangle()
+                    vis = c.is_visible()
+                    ena = c.is_enabled()
+                    log_fn(f"  · Finish found top={r.top} vis={vis} ena={ena}", BLUE)
+                    all_finish.append((c, vis, ena))
+            except:
+                pass
+
+        # เลือกตัวที่ visible และ enabled
+        target = None
+        for c, vis, ena in all_finish:
+            if vis and ena:
+                target = c
+                break
+
+        # fallback: enabled อย่างเดียว
+        if not target:
+            for c, vis, ena in all_finish:
+                if ena:
+                    target = c
+                    break
+
+        if target:
+            target.click_input()  # ← ใช้ click_input แทน click
+            log_fn("✓ Finish clicked", GREEN)
+            time.sleep(0.5)
+        else:
+            log_fn("⚠ No clickable Finish button found", AMBER)
+
+    except Exception as e:
+        log_fn(f"✗ ClickFinish error: {e}", RED_ERR)
+        print(traceback.format_exc(), RED_ERR)
 
 # ============================================================
 #  CORE
@@ -592,7 +642,12 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn,
         ClickOK(rform)
         log_fn("  └ ✓ OK clicked · Repair Window closed", GREEN)
 
+        # 7e Click Finish
+        ClickFinish(main_form, log_fn)
+        log_fn("  └ ✓ Finish clicked", GREEN)
+
     except Exception as e:
+        print(f"[ERROR] {e}")
         log_fn(f"  └ ✗ Add/Repair error: {e}", RED_ERR)
 
     return code, found_red_row

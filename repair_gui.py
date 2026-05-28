@@ -2,6 +2,9 @@ import ctypes
 import sys
 import json
 import os
+import csv
+import zipfile
+import xml.etree.ElementTree as ET
 
 def SetDPIAware():
     try:
@@ -22,13 +25,30 @@ import win32con
 from datetime import datetime
 from PIL import Image
 import tkinter as tk
-from tkinter import font as tkfont
+from tkinter import font as tkfont, filedialog, messagebox, ttk
 from pywinauto import Application, Desktop
 
 # ============================================================
 #  CONFIG
 # ============================================================
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+def DefaultConfig():
+    return {
+        "MODE": "SCRAP",
+        "TEST_MODE": True,
+        "PHENOMENON_VALUE": "Appearance",
+        "FAILURE_CODE": "F142",
+        "LOCATION": "C500",
+        "DUTY_CODE": "Material",
+        "REASON_CODE": "M01--Electrical",
+        "HANDLING": "Scrap",
+        "DUTY_DEPARTMENT": "VQA",
+        "SCRAP_CODE": "0022 - Component Problem (Vendor)",
+        "LOCATION_CODE": "DC20042-DC20043 FET FAIL",
+        "COST_CENTER": "N3414030--IQC WG2",
+        "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor"
+    }
 
 def LoadConfig():
     if getattr(sys, "frozen", False):
@@ -39,21 +59,121 @@ def LoadConfig():
     config_path = os.path.join(base_dir, "config.json")
 
     if not os.path.exists(config_path):
-        default = {
-            "PHENOMENON_VALUE": "Appearance",
-            "FAILURE_CODE":     "F173",
-            "LOCATION":         "C801",
-            "DUTY_CODE":        "Process",
-            "REASON_CODE":      "SOLDERING--SOLDERING",
-            "HANDLING":         "Touchup",
-            "DUTY_DEPARTMENT":  "ME"
-        }
+        default = DefaultConfig()
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(default, f, indent=4, ensure_ascii=False)
         return default
 
     with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        loaded = json.load(f)
+
+    cfg = DefaultConfig()
+    cfg.update(loaded)
+    return cfg
+
+
+def _xlsx_col_index(cell_ref):
+    letters = ""
+    for ch in cell_ref:
+        if ch.isalpha():
+            letters += ch.upper()
+        else:
+            break
+    value = 0
+    for ch in letters:
+        value = value * 26 + (ord(ch) - ord("A") + 1)
+    return value - 1
+
+
+def _serials_from_rows(rows):
+    if not rows:
+        return []
+
+    header = [str(v).strip().lower().replace("_", " ") for v in rows[0]]
+    wanted = ("serial number", "serialnumber", "sn", "serial")
+    sn_col = None
+    for idx, name in enumerate(header):
+        compact = name.replace(" ", "")
+        if name in wanted or compact in wanted:
+            sn_col = idx
+            break
+
+    if sn_col is None:
+        sn_col = 1 if len(rows[0]) > 1 else 0
+        data_rows = rows[1:]
+    else:
+        data_rows = rows[1:]
+
+    serials = []
+    seen = set()
+    for row in data_rows:
+        if sn_col >= len(row):
+            continue
+        sn = str(row[sn_col]).strip()
+        if not sn or sn.lower() in ("serial number", "serial", "sn"):
+            continue
+        if sn not in seen:
+            serials.append(sn)
+            seen.add(sn)
+    return serials
+
+
+def ReadSerialsFromExcel(path):
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".csv":
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            return _serials_from_rows(list(csv.reader(f)))
+
+    if ext not in (".xlsx", ".xlsm"):
+        raise ValueError("Please import a .xlsx, .xlsm, or .csv file")
+
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    }
+
+    with zipfile.ZipFile(path) as zf:
+        shared = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.findall("main:si", ns):
+                shared.append("".join(t.text or "" for t in si.findall(".//main:t", ns)))
+
+        workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+        sheet = workbook.find(".//main:sheet", ns)
+        rel_id = sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
+
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+        target = None
+        for rel in rels:
+            if rel.attrib.get("Id") == rel_id:
+                target = rel.attrib["Target"]
+                break
+        if not target:
+            raise ValueError("Could not find first worksheet")
+
+        sheet_path = "xl/" + target.lstrip("/")
+        sheet_xml = ET.fromstring(zf.read(sheet_path))
+
+    rows = []
+    for row in sheet_xml.findall(".//main:row", ns):
+        values = []
+        for cell in row.findall("main:c", ns):
+            col = _xlsx_col_index(cell.attrib.get("r", "A1"))
+            while len(values) <= col:
+                values.append("")
+            raw = cell.find("main:v", ns)
+            if raw is None:
+                inline = cell.find(".//main:t", ns)
+                values[col] = (inline.text or "").strip() if inline is not None else ""
+                continue
+            value = raw.text or ""
+            if cell.attrib.get("t") == "s":
+                value = shared[int(value)] if value.isdigit() and int(value) < len(shared) else ""
+            values[col] = value.strip()
+        rows.append(values)
+
+    return _serials_from_rows(rows)
 
 # ============================================================
 #  COLOR PALETTE
@@ -182,6 +302,16 @@ def WaitForRepairWindow(timeout=10):
             return wins[0]
         time.sleep(0.5)
     raise RuntimeError(f"Timeout {timeout}s: Repair Window did not appear")
+
+
+def WaitForRepairWindowClosed(timeout=8):
+    start = time.time()
+    while time.time() - start < timeout:
+        wins = Desktop(backend="win32").windows(title_re=r"^Repair Window")
+        if not wins:
+            return True
+        time.sleep(0.2)
+    return False
 
 
 # ============================================================
@@ -379,12 +509,389 @@ def FillDutyCombos(form, duty_code, reason_code, handling, duty_department, log_
             except Exception as e:
                 log_fn(f"  │  └ ✗ Failed: {e}", RED_ERR)
 
-def ClickOK(form):
+def _class_matches(actual_class, expected_class):
+    if actual_class == expected_class:
+        return True
+    lower = actual_class.lower()
+    if expected_class == "TComboBox":
+        return "combo" in lower
+    if expected_class == "TEdit":
+        return "edit" in lower
+    return False
+
+
+def GetVisibleControls(form, class_name):
+    controls = []
+    for c in form.descendants():
+        try:
+            if _class_matches(c.class_name(), class_name) and c.is_visible():
+                controls.append((c, c.rectangle()))
+        except Exception:
+            pass
+    controls.sort(key=lambda x: (x[1].top, x[1].left))
+    return controls
+
+
+def DumpScrapWindowControls(form, log_fn):
+    log_fn("  + Scrap Window visible controls:", BLUE)
+    for idx, c in enumerate(form.descendants()):
+        try:
+            if not c.is_visible():
+                continue
+            r = c.rectangle()
+            log_fn(
+                f"  | #{idx:03d} class={c.class_name()} "
+                f"text='{_control_text(c)}' rect=({r.left},{r.top},{r.right},{r.bottom})",
+                TEXT_SEC
+            )
+        except Exception:
+            pass
+
+
+def WaitForScrapControls(form, log_fn, timeout=5):
+    start = time.time()
+    while time.time() - start < timeout:
+        combos = GetVisibleControls(form, "TComboBox")
+        edits = GetVisibleControls(form, "TEdit")
+        if len(combos) >= 6 and len(edits) >= 6:
+            log_fn(f"  `- OK Controls ready: combos={len(combos)} edits={len(edits)}", GREEN)
+            return True
+        time.sleep(0.2)
+
+    combos = GetVisibleControls(form, "TComboBox")
+    edits = GetVisibleControls(form, "TEdit")
+    log_fn(f"  `- WARN Controls not fully ready: combos={len(combos)} edits={len(edits)}", AMBER)
+    return False
+
+
+def _control_text(ctrl):
     try:
-        form.child_window(title="OK", class_name="TBitBtn").click()
-        time.sleep(0.3)
+        texts = ctrl.texts()
+        return texts[0].strip() if texts else ""
+    except Exception:
+        return ""
+
+
+def _norm_label(text):
+    return text.lower().replace(":", "").replace(" ", "")
+
+
+def FindControlByLabel(form, label_text, target_class):
+    wanted = _norm_label(label_text)
+    labels = []
+    for c in form.descendants():
+        try:
+            if not c.is_visible():
+                continue
+            text = _control_text(c)
+            if not text:
+                continue
+            normalized = _norm_label(text)
+            if wanted == normalized or wanted in normalized:
+                labels.append((c, c.rectangle()))
+        except Exception:
+            pass
+
+    targets = GetVisibleControls(form, target_class)
+    best = None
+    best_score = None
+    for _label, lr in labels:
+        label_y = (lr.top + lr.bottom) // 2
+        for target, tr in targets:
+            target_y = (tr.top + tr.bottom) // 2
+            if tr.left < lr.right - 5:
+                continue
+            dy = abs(target_y - label_y)
+            if dy > 24:
+                continue
+            dx = max(tr.left - lr.right, 0)
+            score = dy * 1000 + dx
+            if best_score is None or score < best_score:
+                best = target
+                best_score = score
+
+    return best
+
+
+def FillComboByLabel(form, label_text, value, log_fn):
+    combo = FindControlByLabel(form, label_text, "TComboBox")
+    if not combo:
+        log_fn(f"  |  `- FAIL {label_text} combo not found", RED_ERR)
+        return False
+
+    log_fn(f"  | [{label_text}] = '{value}'", BLUE)
+    try:
+        combo.select(value)
+        log_fn("  |  `- OK Set via select()", GREEN)
+        return True
+    except Exception:
+        pass
+
+    try:
+        combo.click_input()
+        time.sleep(0.1)
+        import pyperclip
+        pyperclip.copy(str(value))
+        combo.type_keys("^a^v")
+        time.sleep(0.1)
+        combo.type_keys("{TAB}")
+        log_fn("  |  `- OK Set via clipboard", GREEN)
+        return True
     except Exception as e:
-        raise
+        log_fn(f"  |  `- FAIL {e}", RED_ERR)
+        return False
+
+
+def FillComboByLabelOrIndex(form, label_text, value, fallback_index, log_fn):
+    if FillComboByLabel(form, label_text, value, log_fn):
+        return True
+    log_fn(f"  |  `- WARN using {label_text} fallback combo index {fallback_index}", AMBER)
+    return FillComboByIndex(form, fallback_index, value, label_text, log_fn)
+
+
+def FillEditByLabel(form, label_text, value, log_fn):
+    edit = FindControlByLabel(form, label_text, "TEdit")
+    if not edit:
+        log_fn(f"  |  `- FAIL {label_text} edit not found", RED_ERR)
+        return False
+
+    log_fn(f"  | [{label_text}] = '{value}'", BLUE)
+    try:
+        edit.set_edit_text(value)
+        log_fn("  |  `- OK Set via set_edit_text()", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- WARN set_edit_text failed: {e}; trying clipboard", AMBER)
+        try:
+            import pyperclip
+            pyperclip.copy(str(value))
+            edit.click_input()
+            time.sleep(0.1)
+            edit.type_keys("^a^v")
+            log_fn("  |  `- OK Set via clipboard", GREEN)
+            return True
+        except Exception as e2:
+            log_fn(f"  |  `- FAIL {e2}", RED_ERR)
+            return False
+
+
+def FillEditControl(edit, value, label, log_fn):
+    log_fn(f"  | [{label}] = '{value}'", BLUE)
+    try:
+        edit.set_edit_text(value)
+        log_fn("  |  `- OK Set via set_edit_text()", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- WARN set_edit_text failed: {e}; trying clipboard", AMBER)
+        try:
+            import pyperclip
+            pyperclip.copy(str(value))
+            edit.click_input()
+            time.sleep(0.1)
+            edit.type_keys("^a^v")
+            log_fn("  |  `- OK Set via clipboard", GREEN)
+            return True
+        except Exception as e2:
+            log_fn(f"  |  `- FAIL {e2}", RED_ERR)
+            return False
+
+
+def FillLocationCodeSmart(form, value, log_fn):
+    edit = FindControlByLabel(form, "Location Code", "TEdit")
+    if edit:
+        return FillEditControl(edit, value, "Location Code", log_fn)
+
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    left_edits = [
+        (edit, rect) for edit, rect in GetVisibleControls(form, "TEdit")
+        if rect.left < form_mid
+    ]
+    # Scrap window left panel order: LinkMonumber, Location Code, Part No, ...
+    if len(left_edits) > 1:
+        log_fn("  |  `- WARN using Location Code fallback left edit index 1", AMBER)
+        return FillEditControl(left_edits[1][0], value, "Location Code", log_fn)
+
+    log_fn("  |  `- FAIL Location Code edit not found", RED_ERR)
+    return False
+
+
+def FillMemoSmart(form, value, log_fn):
+    edit = FindControlByLabel(form, "Memo", "TEdit")
+    if edit:
+        return FillEditControl(edit, value, "Memo", log_fn)
+
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    right_edits = [
+        (edit, rect) for edit, rect in GetVisibleControls(form, "TEdit")
+        if rect.left >= form_mid
+    ]
+    if right_edits:
+        # Memo is the second edit in the Repairer/Memo block; Function Item is lower.
+        right_edits.sort(key=lambda item: (item[1].top, item[1].left))
+        target = right_edits[1][0] if len(right_edits) > 1 else right_edits[0][0]
+        log_fn("  |  `- WARN using Memo fallback right-side edit index 1", AMBER)
+        return FillEditControl(target, value, "Memo", log_fn)
+
+    log_fn("  |  `- FAIL Memo edit not found", RED_ERR)
+    return False
+
+
+def FillComboByIndex(form, index, value, label, log_fn):
+    combos = GetVisibleControls(form, "TComboBox")
+    if index >= len(combos):
+        log_fn(f"  |  `- FAIL {label} combo index={index} not found", RED_ERR)
+        return False
+
+    combo = combos[index][0]
+    log_fn(f"  | [{label}] = '{value}'", BLUE)
+    try:
+        combo.select(value)
+        log_fn("  |  `- OK Set via select()", GREEN)
+        return True
+    except Exception:
+        try:
+            combo.click_input()
+            time.sleep(0.1)
+            import pyperclip
+            pyperclip.copy(str(value))
+            combo.type_keys("^a^v")
+            time.sleep(0.1)
+            combo.type_keys("{TAB}")
+            log_fn("  |  `- OK Set via clipboard", GREEN)
+            return True
+        except Exception as e:
+            log_fn(f"  |  `- FAIL {e}", RED_ERR)
+            return False
+
+
+def FillLeftComboByIndex(form, index, value, label, log_fn):
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    combos = [
+        (combo, rect) for combo, rect in GetVisibleControls(form, "TComboBox")
+        if rect.left < form_mid
+    ]
+    if index >= len(combos):
+        log_fn(f"  |  `- FAIL {label} left combo index={index} not found", RED_ERR)
+        return False
+
+    combo = combos[index][0]
+    log_fn(f"  | [{label}] = '{value}'", BLUE)
+    try:
+        combo.select(value)
+        log_fn("  |  `- OK Set via select()", GREEN)
+        return True
+    except Exception:
+        try:
+            combo.click_input()
+            time.sleep(0.1)
+            import pyperclip
+            pyperclip.copy(str(value))
+            combo.type_keys("^a^v")
+            time.sleep(0.1)
+            combo.type_keys("{TAB}")
+            log_fn("  |  `- OK Set via clipboard", GREEN)
+            return True
+        except Exception as e:
+            log_fn(f"  |  `- FAIL {e}", RED_ERR)
+            return False
+
+
+def FillEditByIndex(form, index, value, label, log_fn):
+    edits = GetVisibleControls(form, "TEdit")
+    if index >= len(edits):
+        log_fn(f"  |  `- FAIL {label} edit index={index} not found", RED_ERR)
+        return False
+
+    edit = edits[index][0]
+    log_fn(f"  | [{label}] = '{value}'", BLUE)
+    try:
+        edit.set_edit_text(value)
+        log_fn("  |  `- OK Set via set_edit_text()", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- WARN set_edit_text failed: {e}; trying clipboard", AMBER)
+        try:
+            import pyperclip
+            pyperclip.copy(value)
+            edit.click_input()
+            time.sleep(0.1)
+            edit.type_keys("^a^v")
+            log_fn("  |  `- OK Set via clipboard", GREEN)
+            return True
+        except Exception as e2:
+            log_fn(f"  |  `- FAIL {e2}", RED_ERR)
+            return False
+
+
+def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
+    location_code = cfg.get("LOCATION_CODE") or cfg.get("LOCATION", "")
+    memo_template = cfg.get("MEMO_TEMPLATE", "{sn}")
+    try:
+        memo = memo_template.format(sn=sn)
+    except Exception:
+        memo = f"{memo_template}{sn}"
+
+    combos = GetVisibleControls(form, "TComboBox")
+    edits = GetVisibleControls(form, "TEdit")
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    left_edits = [(c, r) for c, r in edits if r.left < form_mid]
+    right_edits = [(c, r) for c, r in edits if r.left >= form_mid]
+
+    log_fn("  + Scrap control map by sorted position:", BLUE)
+    for idx, (_combo, r) in enumerate(combos):
+        log_fn(f"  | combo[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
+    for idx, (_edit, r) in enumerate(left_edits):
+        log_fn(f"  | left_edit[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
+    for idx, (_edit, r) in enumerate(right_edits):
+        log_fn(f"  | right_edit[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
+
+    status_fn("FILL SCRAP", AMBER)
+    FillLeftComboByIndex(form, 0, cfg.get("SCRAP_CODE", ""), "Scrap Code", log_fn)
+    if len(left_edits) > 1:
+        FillEditControl(left_edits[1][0], location_code, "Location Code", log_fn)
+    else:
+        log_fn("  |  `- FAIL Location Code left_edit[1] not found", RED_ERR)
+
+    status_fn("FILL DUTY", AMBER)
+    FillLeftComboByIndex(form, 2, cfg.get("DUTY_CODE", ""), "Duty Code", log_fn)
+    FillLeftComboByIndex(form, 3, cfg.get("REASON_CODE", ""), "Reason Code", log_fn)
+    FillLeftComboByIndex(form, 4, cfg.get("HANDLING", ""), "Handling", log_fn)
+    FillLeftComboByIndex(form, 5, cfg.get("DUTY_DEPARTMENT", ""), "Duty Department", log_fn)
+
+    status_fn("FILL MEMO", AMBER)
+    FillLeftComboByIndex(form, 1, cfg.get("COST_CENTER", ""), "Cost Center", log_fn)
+    FillMemoSmart(form, memo, log_fn)
+
+
+def ClickCancel(form):
+    for title in ("Cancel", "CANCEL"):
+        btn = form.child_window(title=title, class_name="TBitBtn")
+        if btn.exists():
+            btn.click()
+            time.sleep(0.3)
+            return
+    raise RuntimeError("Cancel button not found")
+
+
+def ClickOK(form):
+    # Safety shim: old calls must not submit during testing.
+    ClickCancel(form)
+
+
+def ClickChange(main_form, log_fn):
+    for title in ("Change", "CHANGE"):
+        btn = main_form.child_window(title=title, class_name="TBitBtn")
+        if btn.exists():
+            btn.click_input()
+            time.sleep(0.5)
+            log_fn("  `- OK Change clicked - ready for next SN", GREEN)
+            return True
+    log_fn("  `- WARN Change button not found", AMBER)
+    return False
 
 
 # ============================================================
@@ -549,12 +1056,118 @@ def GetFirstRedErrorCode(main_form, phenomenon_value, sn,
 
     return code, found_red_row
 
+
+def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
+    code = None
+    found_red_row = False
+
+    status_fn("FINDING GRID", AMBER)
+    log_fn("  + Step 1/7 - Finding Error Code Grid...", BLUE)
+    target_grid = FindErrorCodeDBGrid(main_form)
+    if not target_grid:
+        log_fn("  `- FAIL Error Code Grid not found", RED_ERR)
+        return None, False
+    log_fn(f"  `- OK Grid found at {target_grid.rectangle()}", GREEN)
+
+    grid_rect = target_grid.rectangle()
+
+    status_fn("CAPTURING", AMBER)
+    log_fn("  + Step 2/7 - Capturing window image...", BLUE)
+    try:
+        img = GrabWindow(main_form.handle, rect=grid_rect)
+    except Exception as e:
+        log_fn(f"  `- FAIL Capture failed: {e}", RED_ERR)
+        return None, False
+    pixels = img.load()
+    width, height = img.size
+    log_fn(f"  `- OK Captured {width}x{height}px (saved: debug_grid.png)", GREEN)
+
+    status_fn("SCANNING", AMBER)
+    log_fn("  + Step 3/7 - Scanning for red highlighted row...", BLUE)
+    first_red_y = None
+    max_pct = 0.0
+    for y in range(height):
+        red_count = sum(1 for x in range(width) if is_red_bg(*pixels[x, y]))
+        pct = red_count / width * 100
+        max_pct = max(max_pct, pct)
+        if pct > 5.0 and first_red_y is None:
+            first_red_y = grid_rect.top + y
+            found_red_row = True
+            log_fn(f"  `- OK Red row at screen Y={first_red_y} ({pct:.1f}%)", GREEN)
+
+    if not found_red_row:
+        log_fn(f"  `- OK No red rows found (max red={max_pct:.1f}%) - PASS", GREEN)
+        status_fn("CLICK CHANGE", AMBER)
+        ClickChange(main_form, log_fn)
+        return None, False
+
+    status_fn("SELECTING", AMBER)
+    log_fn("  + Step 4/7 - Clicking red row...", BLUE)
+    main_rect = main_form.rectangle()
+    click_x = grid_rect.left + (grid_rect.right - grid_rect.left) // 2
+    main_form.click_input(coords=(click_x - main_rect.left, first_red_y - main_rect.top))
+    time.sleep(0.5)
+    log_fn(f"  `- OK Clicked at X={click_x}, Y={first_red_y}", GREEN)
+
+    status_fn("READING CODE", AMBER)
+    log_fn("  + Step 5/7 - Reading error code from TDBEdit...", BLUE)
+    error_code_edit = FindErrorCodeEdit(main_form)
+    if error_code_edit:
+        raw_text = error_code_edit.texts()[0].strip()
+        if raw_text:
+            code = raw_text
+            log_fn(f"  `- OK Error code: '{code}'", GREEN)
+        else:
+            log_fn("  `- WARN TDBEdit found but empty", AMBER)
+    else:
+        log_fn("  `- FAIL TDBEdit not found", RED_ERR)
+
+    status_fn("CLICK SCRAP", AMBER)
+    log_fn("  + Step 6/7 - Clicking Scrap button...", BLUE)
+    try:
+        scrap_btn = main_form.child_window(title="Scrap", class_name="TBitBtn")
+        if not scrap_btn.exists():
+            scrap_btn = main_form.child_window(title="SCRAP", class_name="TBitBtn")
+        if not scrap_btn.exists():
+            log_fn("  `- FAIL Scrap button not found", RED_ERR)
+            return code, found_red_row
+
+        scrap_btn.click()
+        log_fn("  `- OK Scrap clicked - waiting for Repair Window...", GREEN)
+        repair_win = WaitForRepairWindow(timeout=5)
+
+        status_fn("FILL SCRAP", AMBER)
+        log_fn("  + Step 7/7 - Filling Scrap Window...", BLUE)
+        rapp = Application(backend="win32").connect(handle=repair_win.handle)
+        rform = rapp.window(handle=repair_win.handle)
+        rform.set_focus()
+        WaitForScrapControls(rform, log_fn, timeout=5)
+        DumpScrapWindowControls(rform, log_fn)
+        FillScrapWindow(rform, sn, cfg, log_fn, status_fn)
+
+        status_fn("CANCEL TEST", AMBER)
+        log_fn("  | TEST MODE: clicking Cancel, not OK", AMBER)
+        ClickCancel(rform)
+        log_fn("  | Cancel clicked - waiting for Scrap form to close", BLUE)
+        if WaitForRepairWindowClosed(timeout=8):
+            log_fn("  `- OK Scrap form closed", GREEN)
+        else:
+            log_fn("  `- WARN Scrap form did not close before timeout", AMBER)
+        status_fn("CLICK CHANGE", AMBER)
+        ClickChange(main_form, log_fn)
+
+    except Exception as e:
+        log_fn(f"  `- FAIL Scrap flow error: {e}", RED_ERR)
+
+    return code, found_red_row
+
+
 # ============================================================
 #  MAIN PROCESS
 # ============================================================
-def RunRepairProcess(sn, log_fn, status_fn):
+def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
     try:
-        cfg = LoadConfig()
+        cfg = cfg or LoadConfig()
         phenomenon_value = cfg.get("PHENOMENON_VALUE", "Appearance")
         failure_code     = cfg.get("FAILURE_CODE",     "F173")
         location         = cfg.get("LOCATION",         "C801")
@@ -624,11 +1237,8 @@ def RunRepairProcess(sn, log_fn, status_fn):
         # ── Detect + Fill ─────────────────────────────────────
         status_fn("DETECTING", AMBER)
         log_fn("· Starting detection & repair flow...", BLUE)
-        code, red_row_exists = GetFirstRedErrorCode(
-            repair_form, phenomenon_value, sn,
-            failure_code, location,
-            duty_code, reason_code, handling, duty_department,
-            log_fn, status_fn
+        code, red_row_exists = GetFirstRedErrorCodeScrap(
+            repair_form, cfg, sn, log_fn, status_fn
         )
 
         # ── Result ───────────────────────────────────────────
@@ -662,7 +1272,8 @@ class RepairGUI:
         self.root.title("Repair Automation")
         self.root.configure(bg=BG_DARK)
         self.root.resizable(False, False)
-        self.root.geometry("620x760")
+        self.root.geometry("720x880")
+        self.sn_rows = []
 
         self._build_fonts()
         self._build_ui()
@@ -741,6 +1352,13 @@ class RepairGUI:
             relief="flat", bd=0, cursor="hand2",
             command=self._reset, padx=18, pady=8)
         self.reset_btn.pack(side="left")
+        self.import_btn = tk.Button(
+            br, text="IMPORT EXCEL", font=self.f_btn,
+            bg=BG_PANEL, fg=TEXT_PRI,
+            activebackground=BORDER, activeforeground=TEXT_PRI,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._import_excel, padx=18, pady=8)
+        self.import_btn.pack(side="left", padx=(10, 0))
         self.run_btn = tk.Button(
             br, text="▶  RUN", font=self.f_btn,
             bg=AMBER, fg=BG_DARK,
@@ -748,6 +1366,34 @@ class RepairGUI:
             relief="flat", bd=0, cursor="hand2",
             command=lambda: self._on_scan(None), padx=18, pady=8)
         self.run_btn.pack(side="right")
+
+        tk.Label(self.root, text="SN BATCH STATUS", font=self.f_badge,
+                 bg=BG_DARK, fg=TEXT_SEC, anchor="w").pack(
+                     fill="x", padx=20, pady=(14, 2))
+        tf = tk.Frame(self.root, bg=BG_PANEL,
+                      highlightbackground=BORDER, highlightthickness=1)
+        tf.pack(fill="x", padx=20)
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Treeview", background=BG_PANEL, foreground=TEXT_PRI,
+                        fieldbackground=BG_PANEL, rowheight=24, borderwidth=0)
+        style.configure("Treeview.Heading", background=BG_INPUT,
+                        foreground=TEXT_PRI, borderwidth=0)
+        self.sn_tree = ttk.Treeview(
+            tf, columns=("idx", "sn", "state", "result"),
+            show="headings", height=6)
+        self.sn_tree.heading("idx", text="#")
+        self.sn_tree.heading("sn", text="SN")
+        self.sn_tree.heading("state", text="STATE")
+        self.sn_tree.heading("result", text="RESULT")
+        self.sn_tree.column("idx", width=44, anchor="center", stretch=False)
+        self.sn_tree.column("sn", width=210, anchor="w")
+        self.sn_tree.column("state", width=190, anchor="w")
+        self.sn_tree.column("result", width=210, anchor="w")
+        self.sn_tree.pack(fill="x")
 
         # ── log ──────────────────────────────────────────────
         tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(16, 0))
@@ -792,12 +1438,14 @@ class RepairGUI:
         self.sn_entry.config(state="normal")
         self.run_btn.config(state="normal", bg=AMBER)
         self.reset_btn.config(state="normal")
+        self.import_btn.config(state="normal")
 
     def _set_busy(self):
         self.running = True
         self.sn_entry.config(state="disabled")
         self.run_btn.config(state="disabled", bg=BORDER)
         self.reset_btn.config(state="disabled")
+        self.import_btn.config(state="disabled")
 
     def _log(self, message, color=None):
         def _write():
@@ -827,7 +1475,145 @@ class RepairGUI:
     def _set_result(self, text, color=TEXT_SEC):
         self.root.after(0, lambda: self.result_lbl.config(text=text, fg=color))
 
-    def _on_scan(self, event):
+    def _import_excel(self):
+        if self.running:
+            return
+        path = filedialog.askopenfilename(
+            title="Import SN Excel",
+            filetypes=[
+                ("Excel files", "*.xlsx *.xlsm"),
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            serials = ReadSerialsFromExcel(path)
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            self._log(f"Import failed: {e}", RED_ERR)
+            return
+
+        if not serials:
+            messagebox.showwarning("No SN found", "No serial numbers were found.")
+            return
+
+        self.sn_rows = []
+        for item in self.sn_tree.get_children():
+            self.sn_tree.delete(item)
+        for idx, sn in enumerate(serials, start=1):
+            item_id = self.sn_tree.insert("", "end", values=(idx, sn, "PENDING", ""))
+            self.sn_rows.append({"sn": sn, "item_id": item_id})
+
+        self._set_status("IMPORTED", GREEN)
+        self._set_result(f"{len(serials)} SN loaded", GREEN)
+        self._log(f"Imported {len(serials)} SN(s) from {os.path.basename(path)}", GREEN)
+
+    def _set_sn_state(self, sn, state, result=""):
+        def _write():
+            for idx, row in enumerate(self.sn_rows, start=1):
+                if row["sn"] == sn:
+                    values = list(self.sn_tree.item(row["item_id"], "values"))
+                    current_result = values[3] if len(values) > 3 else ""
+                    self.sn_tree.item(
+                        row["item_id"],
+                        values=(idx, sn, state, result or current_result),
+                    )
+                    self.sn_tree.see(row["item_id"])
+                    break
+        self.root.after(0, _write)
+
+    def _show_context_dialog(self, on_submit):
+        cfg = LoadConfig()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Scrap Context")
+        dialog.configure(bg=BG_DARK)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+
+        fields = [
+            ("SCRAP_CODE", "Scrap Code"),
+            ("LOCATION_CODE", "Location Code"),
+            ("DUTY_CODE", "Duty Code"),
+            ("REASON_CODE", "Reason Code"),
+            ("HANDLING", "Handling"),
+            ("DUTY_DEPARTMENT", "Duty Department"),
+            ("COST_CENTER", "Cost Center"),
+            ("MEMO_TEMPLATE", "Memo Template"),
+        ]
+        values = {}
+        result = {"cfg": None}
+
+        tk.Label(dialog, text="SCRAP FORM CONTEXT", font=self.f_title,
+                 bg=BG_DARK, fg=AMBER).grid(
+                     row=0, column=0, columnspan=2, sticky="w",
+                     padx=16, pady=(14, 8))
+        tk.Label(dialog, text="Memo supports {sn}",
+                 font=self.f_badge, bg=BG_DARK, fg=TEXT_SEC).grid(
+                     row=1, column=0, columnspan=2, sticky="w",
+                     padx=16, pady=(0, 10))
+
+        for row, (key, label) in enumerate(fields, start=2):
+            tk.Label(dialog, text=label, font=self.f_badge,
+                     bg=BG_DARK, fg=TEXT_SEC).grid(
+                         row=row, column=0, sticky="w", padx=(16, 8), pady=4)
+            var = tk.StringVar(value=str(cfg.get(key, "")))
+            values[key] = var
+            ent = tk.Entry(dialog, textvariable=var, font=self.f_label,
+                           bg=BG_INPUT, fg=TEXT_PRI,
+                           insertbackground=AMBER, relief="flat", width=46)
+            ent.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=4, ipady=5)
+
+        test_var = tk.BooleanVar(value=bool(cfg.get("TEST_MODE", True)))
+        test_row = len(fields) + 2
+        tk.Checkbutton(dialog, text="Test mode: click Cancel, not OK",
+                       variable=test_var, font=self.f_badge,
+                       bg=BG_DARK, fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       activebackground=BG_DARK,
+                       activeforeground=TEXT_PRI).grid(
+                           row=test_row, column=0, columnspan=2,
+                           sticky="w", padx=16, pady=(8, 4))
+
+        btns = tk.Frame(dialog, bg=BG_DARK)
+        btns.grid(row=test_row + 1, column=0, columnspan=2,
+                  sticky="e", padx=16, pady=(10, 16))
+
+        def submit():
+            new_cfg = dict(cfg)
+            for key, var in values.items():
+                new_cfg[key] = var.get().strip()
+            new_cfg["MODE"] = "SCRAP"
+            new_cfg["TEST_MODE"] = bool(test_var.get())
+            result["cfg"] = new_cfg
+            dialog.destroy()
+            self.root.after(0, lambda: on_submit(new_cfg))
+
+        def cancel():
+            result["cfg"] = None
+            dialog.destroy()
+
+        tk.Button(btns, text="CANCEL", font=self.f_btn,
+                  bg=BG_PANEL, fg=TEXT_PRI, relief="flat", bd=0,
+                  command=cancel, padx=18, pady=8).pack(side="right", padx=(8, 0))
+        tk.Button(btns, text="RUN", font=self.f_btn,
+                  bg=AMBER, fg=BG_DARK, relief="flat", bd=0,
+                  command=submit, padx=18, pady=8).pack(side="right")
+
+        dialog.bind("<Escape>", lambda e: cancel())
+        dialog.bind("<Return>", lambda e: submit())
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_rooty() + 80
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dialog.lift()
+        dialog.focus_force()
+        dialog.after(250, lambda: dialog.attributes("-topmost", False))
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        return dialog
+
+    def _on_scan_single_unused(self, event):
         if self.running:
             return
         sn = self.sn_var.get().strip()
@@ -853,6 +1639,65 @@ class RepairGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_scan(self, event):
+        if self.running:
+            return
+        sns = [row["sn"] for row in self.sn_rows]
+        if not sns:
+            sn = self.sn_var.get().strip()
+            if sn:
+                item_id = self.sn_tree.insert("", "end", values=(1, sn, "PENDING", ""))
+                self.sn_rows = [{"sn": sn, "item_id": item_id}]
+                sns = [sn]
+
+        if not sns:
+            self._log("No serial number entered", RED_ERR)
+            return
+
+        self._show_context_dialog(lambda run_cfg: self._start_batch(sns, run_cfg))
+
+    def _start_batch(self, sns, run_cfg):
+        self._set_busy()
+        self._set_status("RUNNING...", AMBER)
+        self._set_result("-", TEXT_SEC)
+
+        def worker():
+            total = len(sns)
+            done = 0
+            failed = 0
+            for idx, sn in enumerate(sns, start=1):
+                self._set_sn_state(sn, "START")
+                self._set_status(f"SN {idx}/{total}", AMBER)
+                self._log(f"Batch {idx}/{total}: {sn}", TEXT_PRI)
+
+                def status_for_sn(text, color=GREEN, sn=sn):
+                    self._set_status(f"SN {idx}/{total}: {text}", color)
+                    self._set_sn_state(sn, text)
+
+                try:
+                    code = RunRepairProcess(
+                        sn=sn,
+                        log_fn=self._log,
+                        status_fn=status_for_sn,
+                        cfg=run_cfg,
+                    )
+                    done += 1
+                    if code:
+                        self._set_sn_state(sn, "DONE TEST", code)
+                        self.root.after(0, lambda c=code: self._set_result(c, RED_ERR))
+                    else:
+                        self._set_sn_state(sn, "DONE/PASS", "No error")
+                        self.root.after(0, lambda: self._set_result("No error found", GREEN))
+                except Exception as e:
+                    failed += 1
+                    self._set_sn_state(sn, "FAILED", str(e))
+                    self._log(f"SN {sn} failed: {e}", RED_ERR)
+
+            self._log(f"Batch complete: {done} done, {failed} failed", GREEN)
+            self.root.after(0, self._after_process)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _after_process(self):
         self.sn_var.set("")
         self._set_ready()
@@ -863,6 +1708,9 @@ class RepairGUI:
         if self.running:
             return
         self.sn_var.set("")
+        self.sn_rows = []
+        for item in self.sn_tree.get_children():
+            self.sn_tree.delete(item)
         self._clear_log()
         self._set_status("READY", GREEN)
         self._set_result("—", TEXT_SEC)

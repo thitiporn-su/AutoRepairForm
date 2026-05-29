@@ -38,7 +38,6 @@ DEBUG_CONTROL_LOGS = False
 def DefaultConfig():
     return {
         "MODE": "SCRAP",
-        "TEST_MODE": True,
         "DUTY_CODE": "Material",
         "REASON_CODE": "M01--Electrical",
         "HANDLING": "Scrap",
@@ -1107,6 +1106,125 @@ def ClickOK(form):
     raise RuntimeError("OK button not found")
 
 
+def _win32_child_texts(hwnd):
+    texts = []
+
+    def _enum(child_hwnd, _param):
+        try:
+            text = win32gui.GetWindowText(child_hwnd).strip()
+            if text:
+                texts.append(text)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+    return texts
+
+
+def _click_win32_ok(hwnd):
+    ok_hwnds = []
+
+    def _enum(child_hwnd, _param):
+        try:
+            text = win32gui.GetWindowText(child_hwnd).strip().replace("&", "").lower()
+            cls = win32gui.GetClassName(child_hwnd)
+            if text == "ok" and cls.lower() == "button":
+                ok_hwnds.append(child_hwnd)
+        except Exception:
+            pass
+        return True
+
+    win32gui.EnumChildWindows(hwnd, _enum, None)
+    if not ok_hwnds:
+        return False
+
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+    win32gui.SendMessage(ok_hwnds[0], win32con.BM_CLICK, 0, 0)
+    time.sleep(0.3)
+    return True
+
+
+def _click_dialog_ok(win):
+    try:
+        ClickOK(win)
+        return True
+    except Exception:
+        pass
+    try:
+        return _click_win32_ok(win.handle)
+    except Exception:
+        return False
+
+
+def ClickScrapSuccessOK(log_fn, timeout=8):
+    expected_text = "scrap the production successfully"
+    start = time.time()
+    while time.time() - start < timeout:
+        windows = []
+        seen = set()
+
+        for win in Desktop(backend="win32").windows(visible_only=True):
+            try:
+                windows.append(win)
+                seen.add(win.handle)
+            except Exception:
+                pass
+
+        def _enum(hwnd, _param):
+            try:
+                if win32gui.IsWindowVisible(hwnd) and hwnd not in seen:
+                    windows.append(Desktop(backend="win32").window(handle=hwnd))
+                    seen.add(hwnd)
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_enum, None)
+
+        for win in windows:
+            try:
+                title = win.window_text().strip()
+                title_lower = title.lower()
+
+                texts = [title_lower]
+                texts.extend(text.lower() for text in _win32_child_texts(win.handle))
+                for child in win.descendants():
+                    try:
+                        text = child.window_text().strip()
+                        if text:
+                            texts.append(text.lower())
+                    except Exception:
+                        pass
+
+                is_information = "information" in title_lower
+                has_success_text = any(expected_text in text for text in texts)
+                has_ok_button = any(
+                    text.strip().replace("&", "").lower() == "ok"
+                    for text in _win32_child_texts(win.handle)
+                )
+                if not has_ok_button or not (has_success_text or is_information):
+                    continue
+
+                if not _click_dialog_ok(win):
+                    continue
+                log_fn("  `- OK Scrap success information confirmed", GREEN)
+                return True
+            except Exception:
+                pass
+        time.sleep(0.2)
+
+    log_fn("  `- WARN Scrap success information dialog not found", AMBER)
+    DumpTopWindows(log_fn)
+    return False
+
+
 def _looks_like_privilege_title(title):
     text = (title or "").strip().lower()
     return "previlege control" in text
@@ -1377,7 +1495,7 @@ def WaitForPrivilegeControl(timeout=12, log_fn=None, parent_form=None):
     )
 
 
-def FillPrivilegeControl(cfg, log_fn, status_fn, test_cancel=True, parent_form=None):
+def FillPrivilegeControl(cfg, log_fn, status_fn, parent_form=None):
     status_fn("PRIVILEGE", AMBER)
     log_fn("  | Waiting for Privilege Control...", BLUE)
     privilege_win = WaitForPrivilegeControl(timeout=12, log_fn=log_fn, parent_form=parent_form)
@@ -1405,12 +1523,8 @@ def FillPrivilegeControl(cfg, log_fn, status_fn, test_cancel=True, parent_form=N
         FillEditControl(fields[0], emp, "Privilege Emp", log_fn)
         FillEditControl(fields[1], password, "Privilege Password", log_fn)
 
-    if test_cancel:
-        log_fn("  | TEST MODE: clicking Privilege Cancel", AMBER)
-        ClickCancel(pform)
-    else:
-        log_fn("  | Clicking Privilege OK", BLUE)
-        ClickOK(pform)
+    log_fn("  | Clicking Privilege OK", BLUE)
+    ClickOK(pform)
     time.sleep(0.5)
 
 
@@ -1678,21 +1792,23 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
             DumpScrapWindowControls(rform, log_fn)
         FillScrapWindow(rform, sn, cfg, log_fn, status_fn)
 
-        status_fn("SUBMIT TEST", AMBER)
-        log_fn("  | TEST MODE: clicking Scrap OK to open Privilege Control", AMBER)
-        ClickOK(rform)
-        FillPrivilegeControl(cfg, log_fn, status_fn, test_cancel=True, parent_form=rform)
-
-        status_fn("CANCEL SCRAP", AMBER)
-        log_fn("  | TEST MODE: cancelling Scrap form after privilege test", AMBER)
+        status_fn("SUBMIT", AMBER)
+        log_fn("  | Clicking Scrap OK to submit", BLUE)
         rform_handle = rform.handle
-        rform.set_focus()
-        ClickCancel(rform)
-        log_fn("  | Scrap Cancel clicked - waiting for Scrap form to close", BLUE)
-        if WaitForWindowGone(rform_handle, timeout=2):
-            log_fn("  `- OK Scrap form closed", GREEN)
+        ClickOK(rform)
+        FillPrivilegeControl(cfg, log_fn, status_fn, parent_form=rform)
+
+        status_fn("WAIT CLOSE", AMBER)
+        log_fn("  | Waiting for Scrap form to close after submit", BLUE)
+        if WaitForWindowGone(rform_handle, timeout=5):
+            log_fn("  `- OK Scrap form closed after submit", GREEN)
         else:
-            log_fn("  `- WARN Scrap form handle still visible after 2s", AMBER)
+            log_fn("  `- WARN Scrap form still visible after submit", AMBER)
+
+        status_fn("CONFIRM SUCCESS", AMBER)
+        log_fn("  | Waiting for Scrap success information OK", BLUE)
+        ClickScrapSuccessOK(log_fn)
+
         status_fn("CLICK CHANGE", AMBER)
         ClickChange(main_form, log_fn)
 
@@ -2113,18 +2229,10 @@ class RepairGUI:
                            insertbackground=AMBER, relief="flat", width=46)
             ent.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=4, ipady=5)
 
-        test_var = tk.BooleanVar(value=bool(cfg.get("TEST_MODE", True)))
         test_row = len(fields) + 2
-        tk.Checkbutton(dialog, text="Test mode: click Cancel, not OK",
-                       variable=test_var, font=self.f_badge,
-                       bg=BG_DARK, fg=TEXT_PRI, selectcolor=BG_INPUT,
-                       activebackground=BG_DARK,
-                       activeforeground=TEXT_PRI).grid(
-                           row=test_row, column=0, columnspan=2,
-                           sticky="w", padx=16, pady=(8, 4))
 
         btns = tk.Frame(dialog, bg=BG_DARK)
-        btns.grid(row=test_row + 1, column=0, columnspan=2,
+        btns.grid(row=test_row, column=0, columnspan=2,
                   sticky="e", padx=16, pady=(10, 16))
 
         def submit():
@@ -2132,7 +2240,6 @@ class RepairGUI:
             for key, var in values.items():
                 new_cfg[key] = var.get().strip()
             new_cfg["MODE"] = "SCRAP"
-            new_cfg["TEST_MODE"] = bool(test_var.get())
             result["cfg"] = new_cfg
             dialog.destroy()
             self.root.after(0, lambda: on_submit(new_cfg))

@@ -33,14 +33,12 @@ from pywinauto import Application, Desktop
 # ============================================================
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+DEBUG_CONTROL_LOGS = False
 
 def DefaultConfig():
     return {
         "MODE": "SCRAP",
         "TEST_MODE": True,
-        "PHENOMENON_VALUE": "Appearance",
-        "FAILURE_CODE": "F142",
-        "LOCATION": "C500",
         "DUTY_CODE": "Material",
         "REASON_CODE": "M01--Electrical",
         "HANDLING": "Scrap",
@@ -785,8 +783,10 @@ def FillComboByIndex(form, index, value, label, log_fn):
             pyperclip.copy(str(value))
             combo.type_keys("^a^v")
             time.sleep(0.1)
+            combo.type_keys("{ENTER}")
+            time.sleep(0.1)
             combo.type_keys("{TAB}")
-            log_fn("  |  `- OK Set via clipboard", GREEN)
+            log_fn("  |  `- OK Set via clipboard + enter", GREEN)
             return True
         except Exception as e:
             log_fn(f"  |  `- FAIL {e}", RED_ERR)
@@ -819,8 +819,10 @@ def FillLeftComboByIndex(form, index, value, label, log_fn):
             pyperclip.copy(str(value))
             combo.type_keys("^a^v")
             time.sleep(0.1)
+            combo.type_keys("{ENTER}")
+            time.sleep(0.1)
             combo.type_keys("{TAB}")
-            log_fn("  |  `- OK Set via clipboard", GREEN)
+            log_fn("  |  `- OK Set via clipboard + enter", GREEN)
             return True
         except Exception as e:
             log_fn(f"  |  `- FAIL {e}", RED_ERR)
@@ -896,7 +898,7 @@ def FillEditByIndex(form, index, value, label, log_fn):
 
 
 def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
-    location_code = cfg.get("LOCATION_CODE") or cfg.get("LOCATION", "")
+    location_code = cfg.get("LOCATION_CODE", "")
     memo_template = cfg.get("MEMO_TEMPLATE", "{sn}")
     try:
         memo = memo_template.format(sn=sn)
@@ -913,19 +915,20 @@ def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
     left_edits = [(c, r) for c, r in edits if r.left < form_mid]
     right_edits = [(c, r) for c, r in edits if r.left >= form_mid]
 
-    log_fn("  + Scrap control map by sorted position:", BLUE)
-    for idx, (combo, _r) in enumerate(combos):
-        log_fn(f"  | combo[{idx}] {ControlDebugInfo(combo)}", TEXT_SEC)
-    for idx, (edit, _r) in enumerate(left_edits):
-        log_fn(f"  | left_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
-    for idx, (edit, _r) in enumerate(right_edits):
-        log_fn(f"  | right_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
-    for idx, (edit, _r) in enumerate(standalone_edits):
-        log_fn(f"  | standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
-    for idx, (edit, _r) in enumerate(left_standalone_edits):
-        log_fn(f"  | left_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
-    for idx, (edit, _r) in enumerate(right_standalone_edits):
-        log_fn(f"  | right_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+    if DEBUG_CONTROL_LOGS:
+        log_fn("  + Scrap control map by sorted position:", BLUE)
+        for idx, (combo, _r) in enumerate(combos):
+            log_fn(f"  | combo[{idx}] {ControlDebugInfo(combo)}", TEXT_SEC)
+        for idx, (edit, _r) in enumerate(left_edits):
+            log_fn(f"  | left_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+        for idx, (edit, _r) in enumerate(right_edits):
+            log_fn(f"  | right_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+        for idx, (edit, _r) in enumerate(standalone_edits):
+            log_fn(f"  | standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+        for idx, (edit, _r) in enumerate(left_standalone_edits):
+            log_fn(f"  | left_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+        for idx, (edit, _r) in enumerate(right_standalone_edits):
+            log_fn(f"  | right_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
 
     status_fn("FILL SCRAP", AMBER)
     FillLeftComboByIndex(form, 0, cfg.get("SCRAP_CODE", ""), "Scrap Code", log_fn)
@@ -1230,7 +1233,8 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
         rform = rapp.window(handle=repair_win.handle)
         rform.set_focus()
         WaitForScrapControls(rform, log_fn, timeout=5)
-        DumpScrapWindowControls(rform, log_fn)
+        if DEBUG_CONTROL_LOGS:
+            DumpScrapWindowControls(rform, log_fn)
         FillScrapWindow(rform, sn, cfg, log_fn, status_fn)
 
         status_fn("CANCEL TEST", AMBER)
@@ -1256,22 +1260,14 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
 def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
     try:
         cfg = cfg or LoadConfig()
-        phenomenon_value = cfg.get("PHENOMENON_VALUE", "Appearance")
-        failure_code     = cfg.get("FAILURE_CODE",     "F173")
-        location         = cfg.get("LOCATION",         "C801")
-        duty_code        = cfg.get("DUTY_CODE",        "Process")
-        reason_code      = cfg.get("REASON_CODE",      "SOLDERING--SOLDERING")
-        handling         = cfg.get("HANDLING",         "Touchup")
-        duty_department  = cfg.get("DUTY_DEPARTMENT",  "ME")
-
-        log_fn(f"· Config loaded:", BLUE)
-        log_fn(f"  Phenomenon : {phenomenon_value}", TEXT_SEC)
-        log_fn(f"  Failure    : {failure_code}", TEXT_SEC)
-        log_fn(f"  Location   : {location}", TEXT_SEC)
-        log_fn(f"  Duty Code  : {duty_code}", TEXT_SEC)
-        log_fn(f"  Reason     : {reason_code}", TEXT_SEC)
-        log_fn(f"  Handling   : {handling}", TEXT_SEC)
-        log_fn(f"  Department : {duty_department}", TEXT_SEC)
+        log_fn("· Scrap config loaded:", BLUE)
+        log_fn(f"  Scrap Code : {cfg.get('SCRAP_CODE', '')}", TEXT_SEC)
+        log_fn(f"  Location   : {cfg.get('LOCATION_CODE', '')}", TEXT_SEC)
+        log_fn(f"  Duty Code  : {cfg.get('DUTY_CODE', '')}", TEXT_SEC)
+        log_fn(f"  Reason     : {cfg.get('REASON_CODE', '')}", TEXT_SEC)
+        log_fn(f"  Handling   : {cfg.get('HANDLING', '')}", TEXT_SEC)
+        log_fn(f"  Department : {cfg.get('DUTY_DEPARTMENT', '')}", TEXT_SEC)
+        log_fn(f"  Cost Center: {cfg.get('COST_CENTER', '')}", TEXT_SEC)
 
         log_fn("━" * 42, AMBER)
         log_fn(f"  Serial Number : {sn}", TEXT_PRI)

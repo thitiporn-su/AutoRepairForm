@@ -829,6 +829,112 @@ def FillLeftComboByIndex(form, index, value, label, log_fn):
             return False
 
 
+def FillLeftComboByPrefix(form, index, value, label, log_fn):
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    combos = [
+        (combo, rect) for combo, rect in GetVisibleControls(form, "TComboBox")
+        if rect.left < form_mid
+    ]
+    if index >= len(combos):
+        log_fn(f"  |  `- FAIL {label} left combo index={index} not found", RED_ERR)
+        return False
+
+    combo = combos[index][0]
+    prefix = str(value).split("--", 1)[0].strip() or str(value)
+    log_fn(f"  | [{label}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target left_combo[{index}] {ControlDebugInfo(combo)}", TEXT_SEC)
+
+    try:
+        combo.select(value)
+        log_fn("  |  `- OK Set via select()", GREEN)
+        return True
+    except Exception:
+        pass
+
+    try:
+        rect = combo.rectangle()
+        combo.click_input(coords=(max(8, rect.width() // 4), rect.height() // 2))
+        time.sleep(0.2)
+        combo.type_keys("^a{BACKSPACE}")
+        time.sleep(0.1)
+        combo.type_keys(prefix, with_spaces=True, pause=0.05)
+        time.sleep(0.2)
+        combo.type_keys("{ENTER}")
+        time.sleep(0.2)
+        combo.type_keys("{TAB}")
+        log_fn(f"  |  `- OK Set via prefix '{prefix}' + enter", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- WARN prefix failed: {e}; trying clipboard", AMBER)
+
+    try:
+        rect = combo.rectangle()
+        combo.click_input(coords=(max(8, rect.width() // 4), rect.height() // 2))
+        time.sleep(0.1)
+        import pyperclip
+        pyperclip.copy(prefix)
+        combo.type_keys("^a^v")
+        time.sleep(0.2)
+        combo.type_keys("{ENTER}")
+        time.sleep(0.2)
+        combo.type_keys("{TAB}")
+        log_fn(f"  |  `- OK Set via clipboard prefix '{prefix}' + enter", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- FAIL {e}", RED_ERR)
+        return False
+
+
+def FillLeftReasonCombo(form, index, value, log_fn):
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    combos = [
+        (combo, rect) for combo, rect in GetVisibleControls(form, "TComboBox")
+        if rect.left < form_mid
+    ]
+    if index >= len(combos):
+        log_fn(f"  |  `- FAIL Reason Code left combo index={index} not found", RED_ERR)
+        return False
+
+    combo, rect = combos[index]
+    value = str(value)
+    prefix = value.split("--", 1)[0].strip()
+    log_fn(f"  | [Reason Code] = '{value}'", BLUE)
+    log_fn(f"  |  `- target left_combo[{index}] {ControlDebugInfo(combo)}", TEXT_SEC)
+
+    try:
+        combo.select(value)
+        log_fn("  |  `- OK Set via select()", GREEN)
+        return True
+    except Exception:
+        pass
+
+    try:
+        combo.click_input(coords=(rect.width() - 10, rect.height() // 2))
+        time.sleep(0.3)
+        combo.type_keys("{HOME}")
+
+        if len(prefix) >= 3 and prefix[0].upper() == "M" and prefix[1:].isdigit():
+            down_count = max(int(prefix[1:]) - 1, 0)
+            if down_count:
+                combo.type_keys("{DOWN " + str(down_count) + "}")
+            log_fn(f"  |  `- selecting dropdown row for {prefix}", BLUE)
+        else:
+            combo.type_keys(prefix, with_spaces=True, pause=0.05)
+            log_fn(f"  |  `- selecting dropdown by prefix '{prefix}'", BLUE)
+
+        time.sleep(0.1)
+        combo.type_keys("{ENTER}")
+        time.sleep(0.1)
+        combo.type_keys("{TAB}")
+        log_fn("  |  `- OK Set via dropdown selection", GREEN)
+        return True
+    except Exception as e:
+        log_fn(f"  |  `- FAIL {e}", RED_ERR)
+        return False
+
+
 def GetStandaloneEdits(form):
     edits = []
     for c in form.descendants():
@@ -947,7 +1053,8 @@ def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
 
     status_fn("FILL DUTY", AMBER)
     FillLeftComboByIndex(form, 4, cfg.get("DUTY_CODE", ""), "Duty Code", log_fn)
-    FillLeftComboByIndex(form, 5, cfg.get("REASON_CODE", ""), "Reason Code", log_fn)
+    time.sleep(0.4)
+    FillLeftReasonCombo(form, 5, cfg.get("REASON_CODE", ""), log_fn)
     FillLeftComboByIndex(form, 6, cfg.get("HANDLING", ""), "Handling", log_fn)
     FillLeftComboByIndex(form, 7, cfg.get("DUTY_DEPARTMENT", ""), "Duty Department", log_fn)
 

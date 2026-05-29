@@ -308,10 +308,28 @@ def WaitForRepairWindow(timeout=10):
 def WaitForRepairWindowClosed(timeout=8):
     start = time.time()
     while time.time() - start < timeout:
-        wins = Desktop(backend="win32").windows(title_re=r"^Repair Window")
+        wins = Desktop(backend="win32").windows(
+            title_re=r"^Repair Window",
+            top_level_only=True,
+            visible_only=True,
+        )
         if not wins:
             return True
         time.sleep(0.2)
+    return False
+
+
+def WaitForWindowGone(hwnd, timeout=2):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            if not win32gui.IsWindow(hwnd):
+                return True
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+        except Exception:
+            return True
+        time.sleep(0.1)
     return False
 
 
@@ -1667,13 +1685,14 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
 
         status_fn("CANCEL SCRAP", AMBER)
         log_fn("  | TEST MODE: cancelling Scrap form after privilege test", AMBER)
+        rform_handle = rform.handle
         rform.set_focus()
         ClickCancel(rform)
         log_fn("  | Scrap Cancel clicked - waiting for Scrap form to close", BLUE)
-        if WaitForRepairWindowClosed(timeout=8):
+        if WaitForWindowGone(rform_handle, timeout=2):
             log_fn("  `- OK Scrap form closed", GREEN)
         else:
-            log_fn("  `- WARN Scrap form did not close before timeout", AMBER)
+            log_fn("  `- WARN Scrap form handle still visible after 2s", AMBER)
         status_fn("CLICK CHANGE", AMBER)
         ClickChange(main_form, log_fn)
 

@@ -46,7 +46,9 @@ def DefaultConfig():
         "SCRAP_CODE": "0022 - Component Problem (Vendor)",
         "LOCATION_CODE": "DC20042-DC20043 FET FAIL",
         "COST_CENTER": "N3414030--IQC WG2",
-        "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor"
+        "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor",
+        "PRIVILEGE_EMP": "86047725",
+        "PRIVILEGE_PASSWORD": "Phanya000"
     }
 
 def LoadConfig():
@@ -1067,17 +1069,331 @@ def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
 
 def ClickCancel(form):
     for title in ("Cancel", "CANCEL"):
-        btn = form.child_window(title=title, class_name="TBitBtn")
-        if btn.exists():
-            btn.click()
-            time.sleep(0.3)
-            return
+        for class_name in ("TBitBtn", "TButton", "Button"):
+            btn = form.child_window(title=title, class_name=class_name)
+            if btn.exists():
+                btn.click_input()
+                time.sleep(0.3)
+                return
     raise RuntimeError("Cancel button not found")
 
 
 def ClickOK(form):
-    # Safety shim: old calls must not submit during testing.
-    ClickCancel(form)
+    for title in ("OK", "Ok", "ok"):
+        for class_name in ("TBitBtn", "TButton", "Button"):
+            btn = form.child_window(title=title, class_name=class_name)
+            if btn.exists():
+                btn.click_input()
+                time.sleep(0.3)
+                return
+    raise RuntimeError("OK button not found")
+
+
+def _looks_like_privilege_title(title):
+    text = (title or "").strip().lower()
+    return "previlege control" in text
+
+
+def _visible_window_titles():
+    titles = []
+    for w in Desktop(backend="win32").windows(visible_only=True):
+        try:
+            title = w.window_text().strip()
+            if title:
+                titles.append(title)
+        except Exception:
+            pass
+    return titles
+
+
+def DumpTopWindows(log_fn):
+    log_fn("  + Top-level windows:", BLUE)
+
+    def _enum(hwnd, _param):
+        try:
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            title = win32gui.GetWindowText(hwnd).strip()
+            cls = win32gui.GetClassName(hwnd)
+            rect = win32gui.GetWindowRect(hwnd)
+            if title or "control" in cls.lower() or "repair" in cls.lower():
+                log_fn(
+                    f"  | hwnd={hwnd} class={cls} title='{title}' rect={rect}",
+                    TEXT_SEC,
+                )
+        except Exception:
+            pass
+        return True
+
+    win32gui.EnumWindows(_enum, None)
+
+
+def _find_privilege_hwnd_by_win32():
+    matches = []
+
+    def _enum(hwnd, _param):
+        try:
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            title = win32gui.GetWindowText(hwnd).strip()
+            if _looks_like_privilege_title(title):
+                matches.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    win32gui.EnumWindows(_enum, None)
+    return matches[0] if matches else None
+
+
+def _find_privilege_child_hwnd(parent_hwnd):
+    matches = []
+
+    def _enum(hwnd, _param):
+        try:
+            title = win32gui.GetWindowText(hwnd).strip()
+            if _looks_like_privilege_title(title):
+                matches.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(parent_hwnd, _enum, None)
+    except Exception:
+        pass
+    return matches[0] if matches else None
+
+
+def _find_privilege_child_by_pywinauto(parent_form):
+    try:
+        for c in parent_form.descendants():
+            try:
+                if _looks_like_privilege_title(_control_text(c)):
+                    return c
+                if _looks_like_privilege_title(c.window_text()):
+                    return c
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def FindPrivilegeEditFields(container):
+    labels = {}
+    edits = []
+    try:
+        descendants = container.descendants()
+    except Exception:
+        descendants = []
+
+    for c in descendants:
+        try:
+            if not c.is_visible():
+                continue
+            text = _norm_label(_control_text(c))
+            rect = c.rectangle()
+            if text in ("emp", "password"):
+                labels[text] = rect
+            if _class_matches(c.class_name(), "TEdit"):
+                edits.append((c, rect))
+        except Exception:
+            pass
+
+    found = []
+    for label_name in ("emp", "password"):
+        lr = labels.get(label_name)
+        if not lr:
+            return []
+        label_y = (lr.top + lr.bottom) // 2
+        best = None
+        best_score = None
+        for edit, er in edits:
+            edit_y = (er.top + er.bottom) // 2
+            if er.left < lr.right - 5:
+                continue
+            dy = abs(edit_y - label_y)
+            if dy > 28:
+                continue
+            dx = er.left - lr.right
+            score = dy * 1000 + dx
+            if best_score is None or score < best_score:
+                best = edit
+                best_score = score
+        if not best:
+            return []
+        found.append(best)
+
+    return found
+
+
+def FindEditChildrenByWin32(hwnd):
+    edits = []
+
+    def _enum(child_hwnd, _param):
+        try:
+            if not win32gui.IsWindowVisible(child_hwnd):
+                return True
+            cls = win32gui.GetClassName(child_hwnd)
+            if "edit" in cls.lower():
+                rect = win32gui.GetWindowRect(child_hwnd)
+                ctrl = Desktop(backend="win32").window(handle=child_hwnd)
+                edits.append((ctrl, rect))
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+
+    edits.sort(key=lambda item: (item[1][1], item[1][0]))
+    return [ctrl for ctrl, _rect in edits]
+
+
+def FillPrivilegeByCoordinates(pform, emp, password, log_fn):
+    rect = pform.rectangle()
+    width = rect.width()
+    height = rect.height()
+    emp_pos = (int(width * 0.60), int(height * 0.34))
+    password_pos = (int(width * 0.60), int(height * 0.55))
+
+    log_fn("  |  `- WARN using coordinate fallback for privilege fields", AMBER)
+    import pyperclip
+
+    pform.click_input(coords=emp_pos)
+    time.sleep(0.1)
+    pyperclip.copy(str(emp))
+    pform.type_keys("^a^v")
+
+    pform.click_input(coords=password_pos)
+    time.sleep(0.1)
+    pyperclip.copy(str(password))
+    pform.type_keys("^a^v")
+    log_fn("  |  `- OK Filled privilege fields by coordinates", GREEN)
+
+
+def _parent_has_privilege_fields(parent_form):
+    return len(FindPrivilegeEditFields(parent_form)) >= 2
+
+
+def _window_has_privilege_fields(win):
+    try:
+        texts = []
+        edit_count = 0
+        for c in win.descendants():
+            try:
+                if not c.is_visible():
+                    continue
+                text = _control_text(c).lower()
+                if text:
+                    texts.append(text)
+                if _class_matches(c.class_name(), "TEdit"):
+                    edit_count += 1
+            except Exception:
+                pass
+        joined = " ".join(texts)
+        return "emp" in joined and "password" in joined and edit_count >= 2
+    except Exception:
+        return False
+
+
+def _find_privilege_window_by_fields():
+    for w in Desktop(backend="win32").windows(visible_only=True):
+        try:
+            if _window_has_privilege_fields(w):
+                return w
+        except Exception:
+            pass
+    return None
+
+
+def WaitForPrivilegeControl(timeout=12, log_fn=None, parent_form=None):
+    start = time.time()
+    while time.time() - start < timeout:
+        if parent_form is not None:
+            if _parent_has_privilege_fields(parent_form):
+                return parent_form
+            child = _find_privilege_child_by_pywinauto(parent_form)
+            if child:
+                return child
+            try:
+                hwnd = _find_privilege_child_hwnd(parent_form.handle)
+                if hwnd:
+                    return Desktop(backend="win32").window(handle=hwnd)
+            except Exception:
+                pass
+
+        for w in Desktop(backend="win32").windows(visible_only=True):
+            try:
+                if _looks_like_privilege_title(w.window_text()):
+                    return w
+            except Exception:
+                pass
+        hwnd = _find_privilege_hwnd_by_win32()
+        if hwnd:
+            return Desktop(backend="win32").window(handle=hwnd)
+        field_win = _find_privilege_window_by_fields()
+        if field_win:
+            return field_win
+        time.sleep(0.2)
+    if log_fn:
+        DumpTopWindows(log_fn)
+    titles = ", ".join(_visible_window_titles()[:12])
+    hwnd_titles = []
+    def _enum_titles(hwnd, _param):
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd).strip()
+                if title:
+                    hwnd_titles.append(title)
+        except Exception:
+            pass
+        return True
+    win32gui.EnumWindows(_enum_titles, None)
+    raise RuntimeError(
+        f"Timeout {timeout}s: Privilege Control did not appear. "
+        f"Visible windows: {titles}. Win32 titles: {', '.join(hwnd_titles[:16])}"
+    )
+
+
+def FillPrivilegeControl(cfg, log_fn, status_fn, test_cancel=True, parent_form=None):
+    status_fn("PRIVILEGE", AMBER)
+    log_fn("  | Waiting for Privilege Control...", BLUE)
+    privilege_win = WaitForPrivilegeControl(timeout=12, log_fn=log_fn, parent_form=parent_form)
+    log_fn(f"  | Privilege window found: '{privilege_win.window_text()}'", GREEN)
+    papp = Application(backend="win32").connect(handle=privilege_win.handle)
+    pform = papp.window(handle=privilege_win.handle)
+    pform.set_focus()
+    time.sleep(0.2)
+
+    emp = cfg.get("PRIVILEGE_EMP", "")
+    password = cfg.get("PRIVILEGE_PASSWORD", "")
+    fields = FindPrivilegeEditFields(pform)
+    if len(fields) < 2 and parent_form is not None:
+        fields = FindPrivilegeEditFields(parent_form)
+    if len(fields) < 2:
+        fields = FindEditChildrenByWin32(privilege_win.handle)
+    if len(fields) < 2 and parent_form is not None:
+        fields = FindEditChildrenByWin32(parent_form.handle)
+    if len(fields) < 2:
+        FillPrivilegeByCoordinates(pform, emp, password, log_fn)
+    else:
+        for idx, edit in enumerate(fields):
+            log_fn(f"  | privilege_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+
+        FillEditControl(fields[0], emp, "Privilege Emp", log_fn)
+        FillEditControl(fields[1], password, "Privilege Password", log_fn)
+
+    if test_cancel:
+        log_fn("  | TEST MODE: clicking Privilege Cancel", AMBER)
+        ClickCancel(pform)
+    else:
+        log_fn("  | Clicking Privilege OK", BLUE)
+        ClickOK(pform)
+    time.sleep(0.5)
 
 
 def ClickChange(main_form, log_fn):
@@ -1344,10 +1660,16 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
             DumpScrapWindowControls(rform, log_fn)
         FillScrapWindow(rform, sn, cfg, log_fn, status_fn)
 
-        status_fn("CANCEL TEST", AMBER)
-        log_fn("  | TEST MODE: clicking Cancel, not OK", AMBER)
+        status_fn("SUBMIT TEST", AMBER)
+        log_fn("  | TEST MODE: clicking Scrap OK to open Privilege Control", AMBER)
+        ClickOK(rform)
+        FillPrivilegeControl(cfg, log_fn, status_fn, test_cancel=True, parent_form=rform)
+
+        status_fn("CANCEL SCRAP", AMBER)
+        log_fn("  | TEST MODE: cancelling Scrap form after privilege test", AMBER)
+        rform.set_focus()
         ClickCancel(rform)
-        log_fn("  | Cancel clicked - waiting for Scrap form to close", BLUE)
+        log_fn("  | Scrap Cancel clicked - waiting for Scrap form to close", BLUE)
         if WaitForRepairWindowClosed(timeout=8):
             log_fn("  `- OK Scrap form closed", GREEN)
         else:
@@ -1746,6 +2068,8 @@ class RepairGUI:
             ("DUTY_DEPARTMENT", "Duty Department"),
             ("COST_CENTER", "Cost Center"),
             ("MEMO_TEMPLATE", "Memo Template"),
+            ("PRIVILEGE_EMP", "Privilege Emp"),
+            ("PRIVILEGE_PASSWORD", "Privilege Password"),
         ]
         values = {}
         result = {"cfg": None}

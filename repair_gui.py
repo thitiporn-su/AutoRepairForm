@@ -32,6 +32,7 @@ from pywinauto import Application, Desktop
 #  CONFIG
 # ============================================================
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 
 def DefaultConfig():
     return {
@@ -538,12 +539,7 @@ def DumpScrapWindowControls(form, log_fn):
         try:
             if not c.is_visible():
                 continue
-            r = c.rectangle()
-            log_fn(
-                f"  | #{idx:03d} class={c.class_name()} "
-                f"text='{_control_text(c)}' rect=({r.left},{r.top},{r.right},{r.bottom})",
-                TEXT_SEC
-            )
+            log_fn(f"  | #{idx:03d} {ControlDebugInfo(c)}", TEXT_SEC)
         except Exception:
             pass
 
@@ -570,6 +566,38 @@ def _control_text(ctrl):
         return texts[0].strip() if texts else ""
     except Exception:
         return ""
+
+
+def ControlDebugInfo(ctrl):
+    parts = []
+    try:
+        parts.append(f"class={ctrl.class_name()}")
+    except Exception:
+        parts.append("class=?")
+
+    text = _control_text(ctrl)
+    if text:
+        parts.append(f"text='{text}'")
+
+    try:
+        parts.append(f"handle={ctrl.handle}")
+    except Exception:
+        pass
+
+    try:
+        control_id = ctrl.control_id()
+        if control_id is not None:
+            parts.append(f"id={control_id}")
+    except Exception:
+        pass
+
+    try:
+        r = ctrl.rectangle()
+        parts.append(f"rect=({r.left},{r.top},{r.right},{r.bottom})")
+    except Exception:
+        pass
+
+    return " ".join(parts)
 
 
 def _norm_label(text):
@@ -620,6 +648,7 @@ def FillComboByLabel(form, label_text, value, log_fn):
         return False
 
     log_fn(f"  | [{label_text}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target label-match {ControlDebugInfo(combo)}", TEXT_SEC)
     try:
         combo.select(value)
         log_fn("  |  `- OK Set via select()", GREEN)
@@ -656,6 +685,7 @@ def FillEditByLabel(form, label_text, value, log_fn):
         return False
 
     log_fn(f"  | [{label_text}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target label-match {ControlDebugInfo(edit)}", TEXT_SEC)
     try:
         edit.set_edit_text(value)
         log_fn("  |  `- OK Set via set_edit_text()", GREEN)
@@ -677,6 +707,7 @@ def FillEditByLabel(form, label_text, value, log_fn):
 
 def FillEditControl(edit, value, label, log_fn):
     log_fn(f"  | [{label}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target {ControlDebugInfo(edit)}", TEXT_SEC)
     try:
         edit.set_edit_text(value)
         log_fn("  |  `- OK Set via set_edit_text()", GREEN)
@@ -721,17 +752,12 @@ def FillMemoSmart(form, value, log_fn):
     if edit:
         return FillEditControl(edit, value, "Memo", log_fn)
 
-    form_rect = form.rectangle()
-    form_mid = form_rect.left + form_rect.width() // 2
-    right_edits = [
-        (edit, rect) for edit, rect in GetVisibleControls(form, "TEdit")
-        if rect.left >= form_mid
-    ]
+    right_edits = GetRightStandaloneEdits(form)
     if right_edits:
-        # Memo is the second edit in the Repairer/Memo block; Function Item is lower.
+        # Memo is below the two Repairer edits in the right panel.
         right_edits.sort(key=lambda item: (item[1].top, item[1].left))
-        target = right_edits[1][0] if len(right_edits) > 1 else right_edits[0][0]
-        log_fn("  |  `- WARN using Memo fallback right-side edit index 1", AMBER)
+        target = right_edits[2][0] if len(right_edits) > 2 else right_edits[-1][0]
+        log_fn("  |  `- WARN using Memo fallback right_standalone_edit[2]", AMBER)
         return FillEditControl(target, value, "Memo", log_fn)
 
     log_fn("  |  `- FAIL Memo edit not found", RED_ERR)
@@ -746,6 +772,7 @@ def FillComboByIndex(form, index, value, label, log_fn):
 
     combo = combos[index][0]
     log_fn(f"  | [{label}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target combo[{index}] {ControlDebugInfo(combo)}", TEXT_SEC)
     try:
         combo.select(value)
         log_fn("  |  `- OK Set via select()", GREEN)
@@ -779,6 +806,7 @@ def FillLeftComboByIndex(form, index, value, label, log_fn):
 
     combo = combos[index][0]
     log_fn(f"  | [{label}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target left_combo[{index}] {ControlDebugInfo(combo)}", TEXT_SEC)
     try:
         combo.select(value)
         log_fn("  |  `- OK Set via select()", GREEN)
@@ -799,6 +827,46 @@ def FillLeftComboByIndex(form, index, value, label, log_fn):
             return False
 
 
+def GetStandaloneEdits(form):
+    edits = []
+    for c in form.descendants():
+        try:
+            if c.class_name() == "TEdit" and c.is_visible():
+                edits.append((c, c.rectangle()))
+        except Exception:
+            pass
+    edits.sort(key=lambda item: (item[1].top, item[1].left))
+    return edits
+
+
+def GetLeftStandaloneEdits(form):
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    return [
+        (edit, rect) for edit, rect in GetStandaloneEdits(form)
+        if rect.left < form_mid
+    ]
+
+
+def GetRightStandaloneEdits(form):
+    form_rect = form.rectangle()
+    form_mid = form_rect.left + form_rect.width() // 2
+    return [
+        (edit, rect) for edit, rect in GetStandaloneEdits(form)
+        if rect.left >= form_mid
+    ]
+
+
+def FillStandaloneEditByIndex(edits, index, value, label, log_fn, index_name):
+    if index >= len(edits):
+        log_fn(f"  |  `- FAIL {label} {index_name}[{index}] not found", RED_ERR)
+        return False
+
+    edit = edits[index][0]
+    log_fn(f"  |  `- using {index_name}[{index}]", AMBER)
+    return FillEditControl(edit, value, label, log_fn)
+
+
 def FillEditByIndex(form, index, value, label, log_fn):
     edits = GetVisibleControls(form, "TEdit")
     if index >= len(edits):
@@ -807,6 +875,7 @@ def FillEditByIndex(form, index, value, label, log_fn):
 
     edit = edits[index][0]
     log_fn(f"  | [{label}] = '{value}'", BLUE)
+    log_fn(f"  |  `- target edit[{index}] {ControlDebugInfo(edit)}", TEXT_SEC)
     try:
         edit.set_edit_text(value)
         log_fn("  |  `- OK Set via set_edit_text()", GREEN)
@@ -836,34 +905,53 @@ def FillScrapWindow(form, sn, cfg, log_fn, status_fn):
 
     combos = GetVisibleControls(form, "TComboBox")
     edits = GetVisibleControls(form, "TEdit")
+    standalone_edits = GetStandaloneEdits(form)
+    left_standalone_edits = GetLeftStandaloneEdits(form)
+    right_standalone_edits = GetRightStandaloneEdits(form)
     form_rect = form.rectangle()
     form_mid = form_rect.left + form_rect.width() // 2
     left_edits = [(c, r) for c, r in edits if r.left < form_mid]
     right_edits = [(c, r) for c, r in edits if r.left >= form_mid]
 
     log_fn("  + Scrap control map by sorted position:", BLUE)
-    for idx, (_combo, r) in enumerate(combos):
-        log_fn(f"  | combo[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
-    for idx, (_edit, r) in enumerate(left_edits):
-        log_fn(f"  | left_edit[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
-    for idx, (_edit, r) in enumerate(right_edits):
-        log_fn(f"  | right_edit[{idx}] rect=({r.left},{r.top},{r.right},{r.bottom})", TEXT_SEC)
+    for idx, (combo, _r) in enumerate(combos):
+        log_fn(f"  | combo[{idx}] {ControlDebugInfo(combo)}", TEXT_SEC)
+    for idx, (edit, _r) in enumerate(left_edits):
+        log_fn(f"  | left_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+    for idx, (edit, _r) in enumerate(right_edits):
+        log_fn(f"  | right_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+    for idx, (edit, _r) in enumerate(standalone_edits):
+        log_fn(f"  | standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+    for idx, (edit, _r) in enumerate(left_standalone_edits):
+        log_fn(f"  | left_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
+    for idx, (edit, _r) in enumerate(right_standalone_edits):
+        log_fn(f"  | right_standalone_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
 
     status_fn("FILL SCRAP", AMBER)
     FillLeftComboByIndex(form, 0, cfg.get("SCRAP_CODE", ""), "Scrap Code", log_fn)
-    if len(left_edits) > 1:
-        FillEditControl(left_edits[1][0], location_code, "Location Code", log_fn)
-    else:
-        log_fn("  |  `- FAIL Location Code left_edit[1] not found", RED_ERR)
+    blank_left_standalone_edits = [
+        (edit, rect) for edit, rect in left_standalone_edits
+        if not _control_text(edit)
+    ]
+    FillStandaloneEditByIndex(
+        blank_left_standalone_edits,
+        1,
+        location_code,
+        "Location Code",
+        log_fn,
+        "blank_left_standalone_edit",
+    )
 
     status_fn("FILL DUTY", AMBER)
-    FillLeftComboByIndex(form, 2, cfg.get("DUTY_CODE", ""), "Duty Code", log_fn)
-    FillLeftComboByIndex(form, 3, cfg.get("REASON_CODE", ""), "Reason Code", log_fn)
-    FillLeftComboByIndex(form, 4, cfg.get("HANDLING", ""), "Handling", log_fn)
-    FillLeftComboByIndex(form, 5, cfg.get("DUTY_DEPARTMENT", ""), "Duty Department", log_fn)
+    FillLeftComboByIndex(form, 4, cfg.get("DUTY_CODE", ""), "Duty Code", log_fn)
+    FillLeftComboByIndex(form, 5, cfg.get("REASON_CODE", ""), "Reason Code", log_fn)
+    FillLeftComboByIndex(form, 6, cfg.get("HANDLING", ""), "Handling", log_fn)
+    FillLeftComboByIndex(form, 7, cfg.get("DUTY_DEPARTMENT", ""), "Duty Department", log_fn)
+
+    status_fn("FILL COST", AMBER)
+    FillLeftComboByIndex(form, 2, cfg.get("COST_CENTER", ""), "Cost Center", log_fn)
 
     status_fn("FILL MEMO", AMBER)
-    FillLeftComboByIndex(form, 1, cfg.get("COST_CENTER", ""), "Cost Center", log_fn)
     FillMemoSmart(form, memo, log_fn)
 
 
@@ -1274,10 +1362,15 @@ class RepairGUI:
         self.root.resizable(False, False)
         self.root.geometry("720x880")
         self.sn_rows = []
+        self.log_lock = threading.Lock()
+        os.makedirs(LOG_DIR, exist_ok=True)
+        log_name = datetime.now().strftime("repair_debug_%Y%m%d_%H%M%S.txt")
+        self.log_path = os.path.join(LOG_DIR, log_name)
 
         self._build_fonts()
         self._build_ui()
         self._set_ready()
+        self._log(f"Debug log file: {self.log_path}", AMBER)
         self.sn_entry.focus_set()
 
     def _build_fonts(self):
@@ -1448,8 +1541,16 @@ class RepairGUI:
         self.import_btn.config(state="disabled")
 
     def _log(self, message, color=None):
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {message}\n"
+        try:
+            with self.log_lock:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception:
+            pass
+
         def _write():
-            ts  = datetime.now().strftime("%H:%M:%S")
             tag = {
                 GREEN:    "green",
                 RED_ERR:  "red",

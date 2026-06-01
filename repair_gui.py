@@ -1716,7 +1716,7 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
     target_grid = FindErrorCodeDBGrid(main_form)
     if not target_grid:
         log_fn("  `- FAIL Error Code Grid not found", RED_ERR)
-        return None, False
+        return None, False, False
     log_fn(f"  `- OK Grid found at {target_grid.rectangle()}", GREEN)
 
     grid_rect = target_grid.rectangle()
@@ -1727,7 +1727,7 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
         img = GrabWindow(main_form.handle, rect=grid_rect)
     except Exception as e:
         log_fn(f"  `- FAIL Capture failed: {e}", RED_ERR)
-        return None, False
+        return None, False, False
     pixels = img.load()
     width, height = img.size
     log_fn(f"  `- OK Captured {width}x{height}px (saved: debug_grid.png)", GREEN)
@@ -1749,7 +1749,7 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
         log_fn(f"  `- OK No red rows found (max red={max_pct:.1f}%) - PASS", GREEN)
         status_fn("CLICK CHANGE", AMBER)
         ClickChange(main_form, log_fn)
-        return None, False
+        return None, False, False
 
     status_fn("SELECTING", AMBER)
     log_fn("  + Step 4/7 - Clicking red row...", BLUE)
@@ -1780,7 +1780,7 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
             scrap_btn = main_form.child_window(title="SCRAP", class_name="TBitBtn")
         if not scrap_btn.exists():
             log_fn("  `- FAIL Scrap button not found", RED_ERR)
-            return code, found_red_row
+            return code, found_red_row, False
 
         scrap_btn.click()
         log_fn("  `- OK Scrap clicked - waiting for Repair Window...", GREEN)
@@ -1811,15 +1811,17 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
 
         status_fn("CONFIRM SUCCESS", AMBER)
         log_fn("  | Waiting for Scrap success information OK", BLUE)
-        ClickScrapSuccessOK(log_fn)
+        if not ClickScrapSuccessOK(log_fn):
+            return code, found_red_row, False
 
         status_fn("CLICK CHANGE", AMBER)
         ClickChange(main_form, log_fn)
 
     except Exception as e:
         log_fn(f"  `- FAIL Scrap flow error: {e}", RED_ERR)
+        return code, found_red_row, False
 
-    return code, found_red_row
+    return code, found_red_row, True
 
 
 # ============================================================
@@ -1889,30 +1891,43 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         # ── Detect + Fill ─────────────────────────────────────
         status_fn("DETECTING", AMBER)
         log_fn("· Starting detection & repair flow...", BLUE)
-        code, red_row_exists = GetFirstRedErrorCodeScrap(
+        code, red_row_exists, scrap_completed = GetFirstRedErrorCodeScrap(
             repair_form, cfg, sn, log_fn, status_fn
         )
 
-        # ── Result ───────────────────────────────────────────
-        log_fn("━" * 42, AMBER)
+        if scrap_completed:
+            log_fn(f"  RESULT - Scrap form completed: {code or 'code unavailable'}", GREEN)
+            status_fn("COMPLETE", GREEN)
+            return {
+                "completed": True,
+                "code": code,
+                "message": "Scrap form completed",
+            }
         if red_row_exists:
-            if code:
-                log_fn(f"  RESULT · Error code found : {code}", RED_ERR)
-                status_fn("ERROR FOUND", RED_ERR)
-            else:
-                log_fn("  RESULT · Red row detected but code UNREADABLE", RED_ERR)
-                status_fn("READ ERROR", RED_ERR)
-        else:
-            log_fn("  RESULT · No errors found · PASS ✓", GREEN)
-            status_fn("PASS", GREEN)
-        log_fn("━" * 42, AMBER)
+            log_fn("  RESULT - Scrap form was not completed", RED_ERR)
+            status_fn("FAILED", RED_ERR)
+            return {
+                "completed": False,
+                "code": code,
+                "message": "Scrap form was not completed",
+            }
 
-        return code
+        log_fn("  RESULT - No red repair row found; scrap form was not completed", RED_ERR)
+        status_fn("FAILED", RED_ERR)
+        return {
+            "completed": False,
+            "code": code,
+            "message": "No red repair row found",
+        }
 
     except Exception as e:
         log_fn(f"✗ EXCEPTION : {e}", RED_ERR)
         status_fn("FAILED", RED_ERR)
-        return None
+        return {
+            "completed": False,
+            "code": None,
+            "message": str(e),
+        }
 
 
 # ============================================================
@@ -2284,15 +2299,19 @@ class RepairGUI:
         self._set_result("—", TEXT_SEC)
 
         def worker():
-            code = RunRepairProcess(
+            outcome = RunRepairProcess(
                 sn=sn,
                 log_fn=self._log,
                 status_fn=self._set_status,
             )
-            if code:
-                self.root.after(0, lambda: self._set_result(code, RED_ERR))
+            if outcome["completed"]:
+                result = outcome["code"] or outcome["message"]
+                self.root.after(0, lambda r=result: self._set_result(r, GREEN))
             else:
-                self.root.after(0, lambda: self._set_result("No error found", GREEN))
+                self.root.after(
+                    0,
+                    lambda m=outcome["message"]: self._set_result(m, RED_ERR),
+                )
             self.root.after(0, self._after_process)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2333,25 +2352,31 @@ class RepairGUI:
                     self._set_sn_state(sn, text)
 
                 try:
-                    code = RunRepairProcess(
+                    outcome = RunRepairProcess(
                         sn=sn,
                         log_fn=self._log,
                         status_fn=status_for_sn,
                         cfg=run_cfg,
                     )
-                    done += 1
-                    if code:
-                        self._set_sn_state(sn, "DONE TEST", code)
-                        self.root.after(0, lambda c=code: self._set_result(c, RED_ERR))
+                    if outcome["completed"]:
+                        done += 1
+                        result = outcome["code"] or outcome["message"]
+                        self._set_sn_state(sn, "COMPLETE", result)
+                        self.root.after(0, lambda r=result: self._set_result(r, GREEN))
                     else:
-                        self._set_sn_state(sn, "DONE/PASS", "No error")
-                        self.root.after(0, lambda: self._set_result("No error found", GREEN))
+                        failed += 1
+                        message = outcome["message"]
+                        self._set_sn_state(sn, "FAILED", message)
+                        self.root.after(0, lambda m=message: self._set_result(m, RED_ERR))
                 except Exception as e:
                     failed += 1
                     self._set_sn_state(sn, "FAILED", str(e))
                     self._log(f"SN {sn} failed: {e}", RED_ERR)
 
-            self._log(f"Batch complete: {done} done, {failed} failed", GREEN)
+            summary_color = GREEN if failed == 0 else RED_ERR
+            summary = f"COMPLETE {done}/{total}" if failed == 0 else f"FAILED {failed}/{total}"
+            self._set_status(summary, summary_color)
+            self._log(f"Batch complete: {done} completed, {failed} failed", summary_color)
             self.root.after(0, self._after_process)
 
         threading.Thread(target=worker, daemon=True).start()

@@ -1,8 +1,8 @@
 # How to Use AutoRepairForm.exe
 
-## Step 1: Open the Program Folder
+## Option 1: Use the Existing Program File
 
-Open the program file from the shared folder, or download it from the attached email.
+You can open the program file from the shared folder, or download it from the attached email.
 
 Press:
 
@@ -20,7 +20,85 @@ Then enter the shared folder path:
 
 ---
 
-## Step 2: Run the Program
+## Option 2: Clone the Git Branch and Build the Program
+
+This option is for users who need to get the source code and build the `.exe` file manually.
+
+### Step 1: Clone the Git Repository
+
+Open **Command Prompt**, **Git Bash**, or **Terminal**.
+
+Run the command below:
+
+```bash
+git clone -b scrapfilledform <repository-url>
+```
+
+Example:
+
+```bash
+git clone -b scrapfilledform https://github.com/your-username/your-repository-name.git
+```
+
+> **Note:**
+> Replace `<repository-url>` with the real Git repository URL.
+
+---
+
+### Step 2: Go to the Project Folder
+
+After cloning is complete, go into the project folder:
+
+```bash
+cd your-repository-name
+```
+
+---
+
+### Step 3: Install Required Packages
+
+Run:
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Note:**
+> Make sure Python is already installed on your computer.
+
+---
+
+### Step 4: Build the Program to `.exe`
+
+Run the build command:
+
+```bash
+pyinstaller --onefile --windowed AutoRepairForm.py
+```
+
+Or, if the project already has a `.spec` file, run:
+
+```bash
+pyinstaller AutoRepairForm.spec
+```
+
+---
+
+### Step 5: Find the `.exe` File
+
+After the build is complete, the `.exe` file will be created in the `dist` folder.
+
+Example:
+
+```text
+dist/AutoRepairForm.exe
+```
+
+You can copy this `.exe` file to the shared folder or send it by email.
+
+---
+
+## Step 1: Run the Program
 
 Double-click **AutoRepairForm.exe**.
 
@@ -28,7 +106,7 @@ Double-click **AutoRepairForm.exe**.
 
 ---
 
-## Step 3: Allow the Program to Run
+## Step 2: Allow the Program to Run
 
 If Windows shows a security warning:
 
@@ -39,7 +117,7 @@ If Windows shows a security warning:
 
 ---
 
-## Step 4: Enter or Import Serial Numbers
+## Step 3: Enter or Import Serial Numbers
 
 You can enter the serial number in one of two ways:
 
@@ -50,7 +128,7 @@ You can enter the serial number in one of two ways:
 
 ---
 
-## Step 5: Check the Configuration
+## Step 4: Check the Configuration
 
 After entering or importing the serial numbers, the configuration form will appear.
 
@@ -66,10 +144,16 @@ You can adjust the configuration if needed.
 
 ---
 
-## Step 6: Run the Program
+## Step 5: Run the Program
 
 After confirming the configuration and making sure the Repair-Rev page is ready, click **Run**.
 
 The program will start filling in the serial number information automatically.
 
+````
 
+For your sentence, you can write it like this:
+
+```text
+You can also clone the Git branch named `scrapfilledform` and build the program into an `.exe` file manually.
+````

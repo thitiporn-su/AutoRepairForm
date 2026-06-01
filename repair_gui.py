@@ -44,7 +44,7 @@ def DefaultConfig():
         "DUTY_DEPARTMENT": "VQA",
         "SCRAP_CODE": "0022 - Component Problem (Vendor)",
         "LOCATION_CODE": "DC20042-DC20043 FET FAIL",
-        "COST_CENTER": "N3414030--IQC WG2",
+        "COST_CENTER": "S2314SH1---Prod.-HP-Operation",
         "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor",
         "PRIVILEGE_EMP": "86047725",
         "PRIVILEGE_PASSWORD": "Phanya000"
@@ -726,6 +726,19 @@ def FillEditByLabel(form, label_text, value, log_fn):
             return False
 
 
+def _set_edit_text_native(edit, value):
+    hwnd = getattr(edit, "handle", None)
+    if not hwnd:
+        return False
+
+    text = str(value)
+    win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, text)
+    try:
+        return win32gui.GetWindowText(hwnd) == text
+    except Exception:
+        return True
+
+
 def FillEditControl(edit, value, label, log_fn):
     log_fn(f"  | [{label}] = '{value}'", BLUE)
     log_fn(f"  |  `- target {ControlDebugInfo(edit)}", TEXT_SEC)
@@ -734,14 +747,20 @@ def FillEditControl(edit, value, label, log_fn):
         log_fn("  |  `- OK Set via set_edit_text()", GREEN)
         return True
     except Exception as e:
-        log_fn(f"  |  `- WARN set_edit_text failed: {e}; trying clipboard", AMBER)
+        log_fn(f"  |  `- WARN set_edit_text failed: {e}; trying native Win32", AMBER)
         try:
-            import pyperclip
-            pyperclip.copy(str(value))
+            if _set_edit_text_native(edit, value):
+                log_fn("  |  `- OK Set via Win32 WM_SETTEXT", GREEN)
+                return True
+        except Exception as e2:
+            log_fn(f"  |  `- WARN WM_SETTEXT failed: {e2}; trying keyboard", AMBER)
+
+        try:
             edit.click_input()
             time.sleep(0.1)
-            edit.type_keys("^a^v")
-            log_fn("  |  `- OK Set via clipboard", GREEN)
+            edit.type_keys("^a{BACKSPACE}")
+            edit.type_keys(str(value), with_spaces=True)
+            log_fn("  |  `- OK Set via keyboard", GREEN)
             return True
         except Exception as e2:
             log_fn(f"  |  `- FAIL {e2}", RED_ERR)
@@ -1401,18 +1420,18 @@ def FillPrivilegeByCoordinates(pform, emp, password, log_fn):
     password_pos = (int(width * 0.60), int(height * 0.55))
 
     log_fn("  |  `- WARN using coordinate fallback for privilege fields", AMBER)
-    import pyperclip
 
     pform.click_input(coords=emp_pos)
     time.sleep(0.1)
-    pyperclip.copy(str(emp))
-    pform.type_keys("^a^v")
+    pform.type_keys("^a{BACKSPACE}")
+    pform.type_keys(str(emp), with_spaces=True)
 
     pform.click_input(coords=password_pos)
     time.sleep(0.1)
-    pyperclip.copy(str(password))
-    pform.type_keys("^a^v")
+    pform.type_keys("^a{BACKSPACE}")
+    pform.type_keys(str(password), with_spaces=True)
     log_fn("  |  `- OK Filled privilege fields by coordinates", GREEN)
+    return True
 
 
 def _parent_has_privilege_fields(parent_form):
@@ -1519,13 +1538,17 @@ def FillPrivilegeControl(cfg, log_fn, status_fn, parent_form=None):
     if len(fields) < 2 and parent_form is not None:
         fields = FindEditChildrenByWin32(parent_form.handle)
     if len(fields) < 2:
-        FillPrivilegeByCoordinates(pform, emp, password, log_fn)
+        filled = FillPrivilegeByCoordinates(pform, emp, password, log_fn)
     else:
         for idx, edit in enumerate(fields):
             log_fn(f"  | privilege_edit[{idx}] {ControlDebugInfo(edit)}", TEXT_SEC)
 
-        FillEditControl(fields[0], emp, "Privilege Emp", log_fn)
-        FillEditControl(fields[1], password, "Privilege Password", log_fn)
+        emp_filled = FillEditControl(fields[0], emp, "Privilege Emp", log_fn)
+        password_filled = FillEditControl(fields[1], password, "Privilege Password", log_fn)
+        filled = emp_filled and password_filled
+
+    if not filled:
+        raise RuntimeError("Privilege employee ID or password could not be filled")
 
     log_fn("  | Clicking Privilege OK", BLUE)
     ClickOK(pform)

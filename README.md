@@ -141,10 +141,6 @@ After confirming the configuration and making sure the Repair-Rev page is ready,
 
 The program will start filling in the serial number information automatically.
 
-````
 
-For your sentence, you can write it like this:
 
-```text
-You can also clone the Git branch named `scrapfilledform` and build the program into an `.exe` file manually.
-````
+

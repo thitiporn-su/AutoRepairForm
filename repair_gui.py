@@ -89,7 +89,12 @@ def _serials_from_rows(rows):
     if not rows:
         return []
 
-    header = [str(v).strip().lower().replace("_", " ") for v in rows[0]]
+    # Row 1 contains the work number. Serial numbers begin on row 2.
+    data_rows = rows[1:]
+    if not data_rows:
+        return []
+
+    header = [str(v).strip().lower().replace("_", " ") for v in data_rows[0]]
     wanted = ("serial number", "serialnumber", "sn", "serial")
     sn_col = None
     for idx, name in enumerate(header):
@@ -99,10 +104,9 @@ def _serials_from_rows(rows):
             break
 
     if sn_col is None:
-        sn_col = 1 if len(rows[0]) > 1 else 0
-        data_rows = rows[1:]
+        sn_col = 0
     else:
-        data_rows = rows[1:]
+        data_rows = data_rows[1:]
 
     serials = []
     seen = set()

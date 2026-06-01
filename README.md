@@ -31,17 +31,8 @@ Open **Command Prompt**, **Git Bash**, or **Terminal**.
 Run the command below:
 
 ```bash
-git clone -b scrapfilledform <repository-url>
+git clone -b scrapfilledform https://github.com/thitiporn-su/AutoRepairForm.git
 ```
-
-Example:
-
-```bash
-git clone -b scrapfilledform https://github.com/your-username/your-repository-name.git
-```
-
-> **Note:**
-> Replace `<repository-url>` with the real Git repository URL.
 
 ---
 

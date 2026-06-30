@@ -358,6 +358,16 @@ def WaitForMainForm(timeout=10):
     raise RuntimeError(f"Timeout {timeout}s: TfrmMain did not appear")
 
 
+def FindMainForm():
+    for w in Desktop(backend="win32").windows(title_re=r"^Repair-Rev"):
+        try:
+            if w.class_name() == "TfrmMain":
+                return w
+        except Exception:
+            pass
+    return None
+
+
 def WaitForRepairWindow(timeout=10):
     start = time.time()
     while time.time() - start < timeout:
@@ -1354,60 +1364,78 @@ def _click_dialog_ok(win):
         return False
 
 
-def ClickAlreadyScrappedOK(log_fn, timeout=3):
+def TryClickAlreadyScrappedOK(log_fn):
     expected = (
         "has been scraped",
         "has been scrapped",
         "sn has been scrap",
         "select another sn",
     )
+    for hwnd in _visible_hwnds_deep():
+        try:
+            title = win32gui.GetWindowText(hwnd).strip()
+            cls = win32gui.GetClassName(hwnd)
+            texts = [title]
+            texts.extend(_all_child_texts(hwnd))
+            joined_text = " ".join(texts).lower()
+            has_message = any(phrase in joined_text for phrase in expected)
+
+            ok_hwnd = _find_ok_button_hwnd(hwnd)
+            title_is_repair_dialog = title.lower() == "repair"
+            if not has_message and not (title_is_repair_dialog and ok_hwnd):
+                continue
+
+            if not ok_hwnd:
+                log_fn(
+                    f"  `- WARN Already-scrapped text found but OK button not found: "
+                    f"title='{title}' class='{cls}'",
+                    AMBER,
+                )
+                continue
+
+            if title_is_repair_dialog and not has_message:
+                log_fn(
+                    f"  `- WARN Closing Repair OK dialog by title fallback: "
+                    f"title='{title}' class='{cls}'",
+                    AMBER,
+                )
+
+            if not _click_ok_by_handle(hwnd, ok_hwnd):
+                log_fn(
+                    f"  `- WARN OK clicked but popup may still be visible: "
+                    f"title='{title}' class='{cls}'",
+                    AMBER,
+                )
+                continue
+
+            log_fn(f"  `- OK Already-scrapped popup closed: title='{title}' class='{cls}'", GREEN)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def ClickAlreadyScrappedOK(log_fn, timeout=3):
     start = time.time()
     while time.time() - start < timeout:
-        for hwnd in _visible_hwnds_deep():
-            try:
-                title = win32gui.GetWindowText(hwnd).strip()
-                cls = win32gui.GetClassName(hwnd)
-                texts = [title]
-                texts.extend(_all_child_texts(hwnd))
-                joined_text = " ".join(texts).lower()
-                has_message = any(phrase in joined_text for phrase in expected)
-
-                ok_hwnd = _find_ok_button_hwnd(hwnd)
-                title_is_repair_dialog = title.lower() == "repair"
-                if not has_message and not (title_is_repair_dialog and ok_hwnd):
-                    continue
-
-                if not ok_hwnd:
-                    log_fn(
-                        f"  `- WARN Already-scrapped text found but OK button not found: "
-                        f"title='{title}' class='{cls}'",
-                        AMBER,
-                    )
-                    continue
-
-                if title_is_repair_dialog and not has_message:
-                    log_fn(
-                        f"  `- WARN Closing Repair OK dialog by title fallback: "
-                        f"title='{title}' class='{cls}'",
-                        AMBER,
-                    )
-
-                if not _click_ok_by_handle(hwnd, ok_hwnd):
-                    log_fn(
-                        f"  `- WARN OK clicked but popup may still be visible: "
-                        f"title='{title}' class='{cls}'",
-                        AMBER,
-                    )
-                    continue
-
-                log_fn(f"  `- OK Already-scrapped popup closed: title='{title}' class='{cls}'", GREEN)
-                return True
-            except Exception:
-                pass
+        if TryClickAlreadyScrappedOK(log_fn):
+            return True
         time.sleep(0.2)
 
     log_fn("  `- INFO Already-scrapped popup not found", TEXT_SEC)
     return False
+
+
+def WaitForPopupOrMainForm(log_fn, timeout=10):
+    start = time.time()
+    while time.time() - start < timeout:
+        if TryClickAlreadyScrappedOK(log_fn):
+            return "popup", None
+        main_window = FindMainForm()
+        if main_window:
+            return "main", main_window
+        time.sleep(0.2)
+    raise RuntimeError(f"Timeout {timeout}s: neither already-scrapped popup nor TfrmMain appeared")
 
 
 def ClickScrapSuccessOK(log_fn, timeout=8):
@@ -2144,8 +2172,10 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         ).click()
         log_fn("✓ Repair clicked", GREEN)
 
-        status_fn("CHECK POPUP", AMBER)
-        if ClickAlreadyScrappedOK(log_fn, timeout=8):
+        status_fn("LOADING", AMBER)
+        log_fn("Waiting for popup or main form...", BLUE)
+        wait_result, main_window = WaitForPopupOrMainForm(log_fn, timeout=10)
+        if wait_result == "popup":
             log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
             status_fn("SKIPPED", AMBER)
             return {
@@ -2155,15 +2185,12 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
             }
 
         # ── รอ TfrmMain ──────────────────────────────────────
-        status_fn("LOADING", AMBER)
-        log_fn("· Waiting for main form...", BLUE)
-        main_window = WaitForMainForm(timeout=10)
         repair_app  = Application(backend="win32").connect(handle=main_window.handle)
         repair_form = repair_app.window(handle=main_window.handle)
         log_fn("✓ Main form ready", GREEN)
 
         status_fn("CHECK POPUP", AMBER)
-        if ClickAlreadyScrappedOK(log_fn, timeout=5):
+        if ClickAlreadyScrappedOK(log_fn, timeout=1):
             log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
             status_fn("SKIPPED", AMBER)
             return {

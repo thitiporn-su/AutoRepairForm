@@ -37,17 +37,17 @@ DEBUG_CONTROL_LOGS = False
 
 def DefaultConfig():
     return {
-        "MODE": "SCRAP",
-        "DUTY_CODE": "Material",
-        "REASON_CODE": "M01--Electrical",
-        "HANDLING": "Scrap",
-        "DUTY_DEPARTMENT": "VQA",
-        "SCRAP_CODE": "0022 - Component Problem (Vendor)",
-        "LOCATION_CODE": "DC20042-DC20043 FET FAIL",
-        "COST_CENTER": "S2314SH1---Prod.-HP-Operation",
-        "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor",
-        "PRIVILEGE_EMP": "86047725",
-        "PRIVILEGE_PASSWORD": "Phanya000"
+        # "MODE": "SCRAP",
+        # "DUTY_CODE": "Material",
+        # "REASON_CODE": "M01--Electrical",
+        # "HANDLING": "Scrap",
+        # "DUTY_DEPARTMENT": "VQA",
+        # "SCRAP_CODE": "0022 - Component Problem (Vendor)",
+        # "LOCATION_CODE": "DC20042-DC20043 FET FAIL",
+        # "COST_CENTER": "S2314SH1---Prod.-HP-Operation",
+        # "MEMO_TEMPLATE": "FET fail : {sn}_ON Semiconductor",
+        "PRIVILEGE_EMP": "86394039",
+        "PRIVILEGE_PASSWORD": "bbb@12345"
     }
 
 def LoadConfig():
@@ -85,36 +85,60 @@ def _xlsx_col_index(cell_ref):
     return value - 1
 
 
+def _normalize_header(value):
+    return str(value).strip().lower().replace("_", " ")
+
+
+SCRAP_EXCEL_COLUMNS = {
+    "SERIE_NUMBER": ("serie number", "serienumber", "serial number", "serialnumber", "sn", "serial"),
+    "SCRAP_CODE": ("scrap code", "scrapcode"),
+    "LOCATION_CODE": ("location code", "locationcode"),
+    "DUTY_CODE": ("duty code", "dutycode"),
+    "REASON_CODE": ("reason code", "reasoncode"),
+    "HANDLING": ("handing", "handling"),
+    "DUTY_DEPARTMENT": ("duty department", "dutydepartment"),
+    "COST_CENTER": ("cost center", "costcenter"),
+    "MEMO_TEMPLATE": ("memo", "memo template", "memotemplate"),
+}
+
+
+def _find_scrap_header(rows):
+    for row_idx, row in enumerate(rows):
+        header = [_normalize_header(v) for v in row]
+        columns = {}
+        for idx, name in enumerate(header):
+            compact = name.replace(" ", "")
+            for key, aliases in SCRAP_EXCEL_COLUMNS.items():
+                if name in aliases or compact in aliases:
+                    columns[key] = idx
+        if "SERIE_NUMBER" in columns:
+            return row_idx, columns
+    return None, {}
+
+
 def _serials_from_rows(rows):
     if not rows:
         return []
 
-    # Row 1 contains the work number. Serial numbers begin on row 2.
-    data_rows = rows[1:]
-    if not data_rows:
-        return []
-
-    header = [str(v).strip().lower().replace("_", " ") for v in data_rows[0]]
-    wanted = ("serial number", "serialnumber", "sn", "serial")
-    sn_col = None
-    for idx, name in enumerate(header):
-        compact = name.replace(" ", "")
-        if name in wanted or compact in wanted:
-            sn_col = idx
-            break
+    header_row, columns = _find_scrap_header(rows)
+    sn_col = columns.get("SERIE_NUMBER")
 
     if sn_col is None:
+        # Backward-compatible fallback for simple one-column import files.
         sn_col = 0
+        data_start = 0
     else:
-        data_rows = data_rows[1:]
+        data_start = header_row + 1
 
     serials = []
     seen = set()
-    for row in data_rows:
+    for row in rows[data_start:]:
         if sn_col >= len(row):
             continue
         sn = str(row[sn_col]).strip()
-        if not sn or sn.lower() in ("serial number", "serial", "sn"):
+        normalized = _normalize_header(sn)
+        compact = normalized.replace(" ", "")
+        if not sn or normalized in SCRAP_EXCEL_COLUMNS["SERIE_NUMBER"] or compact in SCRAP_EXCEL_COLUMNS["SERIE_NUMBER"]:
             continue
         if sn not in seen:
             serials.append(sn)
@@ -122,12 +146,48 @@ def _serials_from_rows(rows):
     return serials
 
 
+def _scrap_rows_from_rows(rows):
+    header_row, columns = _find_scrap_header(rows)
+    if header_row is None:
+        return [{"sn": sn, "cfg": {}} for sn in _serials_from_rows(rows)]
+
+    serials = []
+    seen = set()
+    for row in rows[header_row + 1:]:
+        sn_col = columns["SERIE_NUMBER"]
+        if sn_col >= len(row):
+            continue
+        sn = str(row[sn_col]).strip()
+        normalized = _normalize_header(sn)
+        compact = normalized.replace(" ", "")
+        if not sn or normalized in SCRAP_EXCEL_COLUMNS["SERIE_NUMBER"] or compact in SCRAP_EXCEL_COLUMNS["SERIE_NUMBER"]:
+            continue
+        if sn in seen:
+            continue
+
+        cfg = {}
+        for key, col in columns.items():
+            if key == "SERIE_NUMBER" or col >= len(row):
+                continue
+            value = str(row[col]).strip()
+            if value:
+                cfg[key] = value
+
+        serials.append({"sn": sn, "cfg": cfg})
+        seen.add(sn)
+    return serials
+
+
 def ReadSerialsFromExcel(path):
+    return [row["sn"] for row in ReadScrapRowsFromExcel(path)]
+
+
+def ReadScrapRowsFromExcel(path):
     ext = os.path.splitext(path)[1].lower()
 
     if ext == ".csv":
         with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            return _serials_from_rows(list(csv.reader(f)))
+            return _scrap_rows_from_rows(list(csv.reader(f)))
 
     if ext not in (".xlsx", ".xlsm"):
         raise ValueError("Please import a .xlsx, .xlsm, or .csv file")
@@ -177,7 +237,7 @@ def ReadSerialsFromExcel(path):
             values[col] = value.strip()
         rows.append(values)
 
-    return _serials_from_rows(rows)
+    return _scrap_rows_from_rows(rows)
 
 # ============================================================
 #  COLOR PALETTE
@@ -1174,6 +1234,114 @@ def _click_win32_ok(hwnd):
     return True
 
 
+def _all_child_texts(hwnd):
+    texts = []
+
+    def _enum(child_hwnd, _param):
+        try:
+            text = win32gui.GetWindowText(child_hwnd).strip()
+            if text:
+                texts.append(text)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+    return texts
+
+
+def _find_ok_button_hwnd(hwnd):
+    ok_hwnds = []
+
+    def _enum(child_hwnd, _param):
+        try:
+            text = win32gui.GetWindowText(child_hwnd).strip().replace("&", "").lower()
+            cls = win32gui.GetClassName(child_hwnd).lower()
+            if text == "ok" and cls in ("button", "tbutton", "tbitbtn"):
+                ok_hwnds.append(child_hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+    return ok_hwnds[0] if ok_hwnds else None
+
+
+def _visible_hwnds_deep():
+    hwnds = []
+    seen = set()
+
+    def _add(hwnd):
+        if hwnd in seen:
+            return
+        seen.add(hwnd)
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                hwnds.append(hwnd)
+        except Exception:
+            pass
+
+    def _enum_child(child_hwnd, _param):
+        _add(child_hwnd)
+        return True
+
+    def _enum_top(hwnd, _param):
+        _add(hwnd)
+        try:
+            win32gui.EnumChildWindows(hwnd, _enum_child, None)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(_enum_top, None)
+    except Exception:
+        pass
+    return hwnds
+
+
+def _click_ok_by_handle(dialog_hwnd, ok_hwnd):
+    try:
+        if win32gui.IsIconic(dialog_hwnd):
+            win32gui.ShowWindow(dialog_hwnd, win32con.SW_RESTORE)
+    except Exception:
+        pass
+    try:
+        win32gui.SetWindowPos(
+            dialog_hwnd,
+            win32con.HWND_TOPMOST,
+            0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
+        )
+        win32gui.SetForegroundWindow(dialog_hwnd)
+    except Exception:
+        pass
+    try:
+        win32gui.SendMessage(ok_hwnd, win32con.BM_CLICK, 0, 0)
+    except Exception:
+        try:
+            win32gui.PostMessage(ok_hwnd, win32con.BM_CLICK, 0, 0)
+        except Exception:
+            return False
+    time.sleep(0.2)
+    for _ in range(10):
+        try:
+            if not win32gui.IsWindow(ok_hwnd) or not win32gui.IsWindowVisible(ok_hwnd):
+                return True
+            if not win32gui.IsWindow(dialog_hwnd) or not win32gui.IsWindowVisible(dialog_hwnd):
+                return True
+        except Exception:
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _click_dialog_ok(win):
     try:
         ClickOK(win)
@@ -1184,6 +1352,62 @@ def _click_dialog_ok(win):
         return _click_win32_ok(win.handle)
     except Exception:
         return False
+
+
+def ClickAlreadyScrappedOK(log_fn, timeout=3):
+    expected = (
+        "has been scraped",
+        "has been scrapped",
+        "sn has been scrap",
+        "select another sn",
+    )
+    start = time.time()
+    while time.time() - start < timeout:
+        for hwnd in _visible_hwnds_deep():
+            try:
+                title = win32gui.GetWindowText(hwnd).strip()
+                cls = win32gui.GetClassName(hwnd)
+                texts = [title]
+                texts.extend(_all_child_texts(hwnd))
+                joined_text = " ".join(texts).lower()
+                has_message = any(phrase in joined_text for phrase in expected)
+
+                ok_hwnd = _find_ok_button_hwnd(hwnd)
+                title_is_repair_dialog = title.lower() == "repair"
+                if not has_message and not (title_is_repair_dialog and ok_hwnd):
+                    continue
+
+                if not ok_hwnd:
+                    log_fn(
+                        f"  `- WARN Already-scrapped text found but OK button not found: "
+                        f"title='{title}' class='{cls}'",
+                        AMBER,
+                    )
+                    continue
+
+                if title_is_repair_dialog and not has_message:
+                    log_fn(
+                        f"  `- WARN Closing Repair OK dialog by title fallback: "
+                        f"title='{title}' class='{cls}'",
+                        AMBER,
+                    )
+
+                if not _click_ok_by_handle(hwnd, ok_hwnd):
+                    log_fn(
+                        f"  `- WARN OK clicked but popup may still be visible: "
+                        f"title='{title}' class='{cls}'",
+                        AMBER,
+                    )
+                    continue
+
+                log_fn(f"  `- OK Already-scrapped popup closed: title='{title}' class='{cls}'", GREEN)
+                return True
+            except Exception:
+                pass
+        time.sleep(0.2)
+
+    log_fn("  `- INFO Already-scrapped popup not found", TEXT_SEC)
+    return False
 
 
 def ClickScrapSuccessOK(log_fn, timeout=8):
@@ -1770,6 +1994,8 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
 
     if not found_red_row:
         log_fn(f"  `- OK No red rows found (max red={max_pct:.1f}%) - PASS", GREEN)
+        status_fn("CLOSE POPUP", AMBER)
+        ClickAlreadyScrappedOK(log_fn)
         status_fn("CLICK CHANGE", AMBER)
         ClickChange(main_form, log_fn)
         return None, False, False
@@ -1818,6 +2044,23 @@ def GetFirstRedErrorCodeScrap(main_form, cfg, sn, log_fn, status_fn):
         if DEBUG_CONTROL_LOGS:
             DumpScrapWindowControls(rform, log_fn)
         FillScrapWindow(rform, sn, cfg, log_fn, status_fn)
+
+        if cfg.get("TEST_MODE"):
+            status_fn("TEST CANCEL", AMBER)
+            log_fn("  | Test mode: clicking Scrap Cancel instead of OK submit", BLUE)
+            rform_handle = rform.handle
+            ClickCancel(rform)
+
+            status_fn("WAIT CLOSE", AMBER)
+            log_fn("  | Waiting for Scrap form to close after cancel", BLUE)
+            if WaitForWindowGone(rform_handle, timeout=5):
+                log_fn("  `- OK Scrap form closed after cancel", GREEN)
+            else:
+                log_fn("  `- WARN Scrap form still visible after cancel", AMBER)
+
+            status_fn("CLICK CHANGE", AMBER)
+            ClickChange(main_form, log_fn)
+            return code, found_red_row, True
 
         status_fn("SUBMIT", AMBER)
         log_fn("  | Clicking Scrap OK to submit", BLUE)
@@ -1901,15 +2144,36 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         ).click()
         log_fn("✓ Repair clicked", GREEN)
 
+        status_fn("CHECK POPUP", AMBER)
+        if ClickAlreadyScrappedOK(log_fn, timeout=8):
+            log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
+            status_fn("SKIPPED", AMBER)
+            return {
+                "completed": True,
+                "code": None,
+                "message": "SN already scrapped",
+            }
+
         # ── รอ TfrmMain ──────────────────────────────────────
         status_fn("LOADING", AMBER)
         log_fn("· Waiting for main form...", BLUE)
         main_window = WaitForMainForm(timeout=10)
         repair_app  = Application(backend="win32").connect(handle=main_window.handle)
         repair_form = repair_app.window(handle=main_window.handle)
+        log_fn("✓ Main form ready", GREEN)
+
+        status_fn("CHECK POPUP", AMBER)
+        if ClickAlreadyScrappedOK(log_fn, timeout=5):
+            log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
+            status_fn("SKIPPED", AMBER)
+            return {
+                "completed": True,
+                "code": None,
+                "message": "SN already scrapped",
+            }
+
         repair_form.set_focus()
         time.sleep(1)
-        log_fn("✓ Main form ready", GREEN)
 
         # ── Detect + Fill ─────────────────────────────────────
         status_fn("DETECTING", AMBER)
@@ -1965,6 +2229,7 @@ class RepairGUI:
         self.root.geometry("720x880")
         self.sn_rows = []
         self.log_lock = threading.Lock()
+        self.test_mode_var = tk.BooleanVar(value=False)
         os.makedirs(LOG_DIR, exist_ok=True)
         log_name = datetime.now().strftime("repair_debug_%Y%m%d_%H%M%S.txt")
         self.log_path = os.path.join(LOG_DIR, log_name)
@@ -2054,6 +2319,15 @@ class RepairGUI:
             relief="flat", bd=0, cursor="hand2",
             command=self._import_excel, padx=18, pady=8)
         self.import_btn.pack(side="left", padx=(10, 0))
+        self.mode_btn = tk.Checkbutton(
+            br, text="REAL MODE", variable=self.test_mode_var,
+            font=self.f_btn, indicatoron=False,
+            bg=GREEN, fg=BG_DARK,
+            selectcolor=AMBER,
+            activebackground=AMBER_DIM, activeforeground=TEXT_PRI,
+            relief="flat", bd=0, cursor="hand2",
+            command=self._update_mode_button, padx=18, pady=8)
+        self.mode_btn.pack(side="left", padx=(10, 0))
         self.run_btn = tk.Button(
             br, text="▶  RUN", font=self.f_btn,
             bg=AMBER, fg=BG_DARK,
@@ -2123,6 +2397,7 @@ class RepairGUI:
         self.log_text.tag_config("dim",    foreground=TEXT_SEC)
         self.log_text.tag_config("white",  foreground=TEXT_PRI)
         self.log_text.tag_config("normal", foreground=TEXT_MONO)
+        self._update_mode_button()
 
     def _tick_clock(self):
         self.clock_lbl.config(text=datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
@@ -2134,6 +2409,7 @@ class RepairGUI:
         self.run_btn.config(state="normal", bg=AMBER)
         self.reset_btn.config(state="normal")
         self.import_btn.config(state="normal")
+        self.mode_btn.config(state="normal")
 
     def _set_busy(self):
         self.running = True
@@ -2141,6 +2417,13 @@ class RepairGUI:
         self.run_btn.config(state="disabled", bg=BORDER)
         self.reset_btn.config(state="disabled")
         self.import_btn.config(state="disabled")
+        self.mode_btn.config(state="disabled")
+
+    def _update_mode_button(self):
+        if self.test_mode_var.get():
+            self.mode_btn.config(text="TEST MODE", bg=AMBER, fg=BG_DARK)
+        else:
+            self.mode_btn.config(text="REAL MODE", bg=GREEN, fg=BG_DARK)
 
     def _log(self, message, color=None):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -2192,26 +2475,27 @@ class RepairGUI:
         if not path:
             return
         try:
-            serials = ReadSerialsFromExcel(path)
+            scrap_rows = ReadScrapRowsFromExcel(path)
         except Exception as e:
             messagebox.showerror("Import failed", str(e))
             self._log(f"Import failed: {e}", RED_ERR)
             return
 
-        if not serials:
+        if not scrap_rows:
             messagebox.showwarning("No SN found", "No serial numbers were found.")
             return
 
         self.sn_rows = []
         for item in self.sn_tree.get_children():
             self.sn_tree.delete(item)
-        for idx, sn in enumerate(serials, start=1):
+        for idx, row in enumerate(scrap_rows, start=1):
+            sn = row["sn"]
             item_id = self.sn_tree.insert("", "end", values=(idx, sn, "PENDING", ""))
-            self.sn_rows.append({"sn": sn, "item_id": item_id})
+            self.sn_rows.append({"sn": sn, "item_id": item_id, "cfg": row.get("cfg", {})})
 
         self._set_status("IMPORTED", GREEN)
-        self._set_result(f"{len(serials)} SN loaded", GREEN)
-        self._log(f"Imported {len(serials)} SN(s) from {os.path.basename(path)}", GREEN)
+        self._set_result(f"{len(scrap_rows)} SN loaded", GREEN)
+        self._log(f"Imported {len(scrap_rows)} SN(s) from {os.path.basename(path)}", GREEN)
 
     def _set_sn_state(self, sn, state, result=""):
         def _write():
@@ -2237,14 +2521,6 @@ class RepairGUI:
         dialog.attributes("-topmost", True)
 
         fields = [
-            ("SCRAP_CODE", "Scrap Code"),
-            ("LOCATION_CODE", "Location Code"),
-            ("DUTY_CODE", "Duty Code"),
-            ("REASON_CODE", "Reason Code"),
-            ("HANDLING", "Handling"),
-            ("DUTY_DEPARTMENT", "Duty Department"),
-            ("COST_CENTER", "Cost Center"),
-            ("MEMO_TEMPLATE", "Memo Template"),
             ("PRIVILEGE_EMP", "Privilege Emp"),
             ("PRIVILEGE_PASSWORD", "Privilege Password"),
         ]
@@ -2255,7 +2531,7 @@ class RepairGUI:
                  bg=BG_DARK, fg=AMBER).grid(
                      row=0, column=0, columnspan=2, sticky="w",
                      padx=16, pady=(14, 8))
-        tk.Label(dialog, text="Memo supports {sn}",
+        tk.Label(dialog, text="Scrap fields load from the imported Excel row",
                  font=self.f_badge, bg=BG_DARK, fg=TEXT_SEC).grid(
                      row=1, column=0, columnspan=2, sticky="w",
                      padx=16, pady=(0, 10))
@@ -2347,25 +2623,31 @@ class RepairGUI:
             sn = self.sn_var.get().strip()
             if sn:
                 item_id = self.sn_tree.insert("", "end", values=(1, sn, "PENDING", ""))
-                self.sn_rows = [{"sn": sn, "item_id": item_id}]
+                self.sn_rows = [{"sn": sn, "item_id": item_id, "cfg": {}}]
                 sns = [sn]
 
         if not sns:
             self._log("No serial number entered", RED_ERR)
             return
 
-        self._show_context_dialog(lambda run_cfg: self._start_batch(sns, run_cfg))
+        batch_rows = list(self.sn_rows)
+        self._show_context_dialog(lambda run_cfg: self._start_batch(batch_rows, run_cfg))
 
-    def _start_batch(self, sns, run_cfg):
+    def _start_batch(self, batch_rows, run_cfg):
+        run_cfg = dict(run_cfg)
+        run_cfg["TEST_MODE"] = self.test_mode_var.get()
         self._set_busy()
         self._set_status("RUNNING...", AMBER)
         self._set_result("-", TEXT_SEC)
+        mode_name = "TEST" if run_cfg["TEST_MODE"] else "REAL"
+        self._log(f"Run mode: {mode_name}", AMBER)
 
         def worker():
-            total = len(sns)
+            total = len(batch_rows)
             done = 0
             failed = 0
-            for idx, sn in enumerate(sns, start=1):
+            for idx, row in enumerate(batch_rows, start=1):
+                sn = row["sn"]
                 self._set_sn_state(sn, "START")
                 self._set_status(f"SN {idx}/{total}", AMBER)
                 self._log(f"Batch {idx}/{total}: {sn}", TEXT_PRI)
@@ -2375,11 +2657,15 @@ class RepairGUI:
                     self._set_sn_state(sn, text)
 
                 try:
+                    effective_cfg = dict(run_cfg)
+                    effective_cfg.update(row.get("cfg", {}))
+                    effective_cfg["PRIVILEGE_EMP"] = run_cfg.get("PRIVILEGE_EMP", "")
+                    effective_cfg["PRIVILEGE_PASSWORD"] = run_cfg.get("PRIVILEGE_PASSWORD", "")
                     outcome = RunRepairProcess(
                         sn=sn,
                         log_fn=self._log,
                         status_fn=status_for_sn,
-                        cfg=run_cfg,
+                        cfg=effective_cfg,
                     )
                     if outcome["completed"]:
                         done += 1

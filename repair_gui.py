@@ -490,6 +490,128 @@ def FindErrorCodeEdit(main_form):
     return None
 
 
+def NormalizeSN(value):
+    return "".join(str(value or "").split()).upper()
+
+
+def _control_text(ctrl):
+    try:
+        texts = ctrl.texts()
+        if texts:
+            return str(texts[0]).strip()
+    except Exception:
+        pass
+    try:
+        return str(ctrl.window_text()).strip()
+    except Exception:
+        return ""
+
+
+def _is_edit_control(ctrl):
+    try:
+        cls = ctrl.class_name().lower()
+        return "edit" in cls
+    except Exception:
+        return False
+
+
+def ReadEditRightOfLabel(form, label_names):
+    labels = []
+    edits = []
+    compact_labels = [NormalizeSN(label) for label in label_names]
+
+    for ctrl in form.descendants():
+        try:
+            if not ctrl.is_visible():
+                continue
+            text = _control_text(ctrl)
+            rect = ctrl.rectangle()
+            if _is_edit_control(ctrl):
+                edits.append((ctrl, rect))
+                continue
+            compact_text = NormalizeSN(text)
+            if compact_text and any(label in compact_text for label in compact_labels):
+                labels.append((ctrl, rect))
+        except Exception:
+            pass
+
+    labels.sort(key=lambda item: (item[1].top, item[1].left))
+    edits.sort(key=lambda item: (item[1].top, item[1].left))
+
+    for _label, label_rect in labels:
+        label_mid_y = (label_rect.top + label_rect.bottom) // 2
+        candidates = []
+        for edit, edit_rect in edits:
+            edit_mid_y = (edit_rect.top + edit_rect.bottom) // 2
+            if edit_rect.left < label_rect.right - 10:
+                continue
+            if abs(edit_mid_y - label_mid_y) > max(18, label_rect.height()):
+                continue
+            candidates.append((edit_rect.left - label_rect.right, edit))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            return _control_text(candidates[0][1])
+
+    return ""
+
+
+def ReadFirstNonEmptyEdit(form):
+    edits = []
+    for ctrl in form.descendants():
+        try:
+            if ctrl.is_visible() and _is_edit_control(ctrl):
+                edits.append((ctrl, ctrl.rectangle()))
+        except Exception:
+            pass
+
+    edits.sort(key=lambda item: (item[1].top, item[1].left))
+    for edit, _rect in edits:
+        text = _control_text(edit)
+        if text:
+            return text
+    return ""
+
+
+def ReadDetectSN(main_form):
+    value = ReadEditRightOfLabel(main_form, ("Detect SN", "DetectSN"))
+    return value or ReadFirstNonEmptyEdit(main_form)
+
+
+def WaitForMainAfterPopup(main_window=None, timeout=8):
+    start = time.time()
+
+    while time.time() - start < timeout:
+        main_window = main_window or FindMainForm()
+        if main_window:
+            return main_window
+        time.sleep(0.2)
+
+    return main_window
+
+
+def PopupSNMatchesForRedDetection(main_window, expected_sn, log_fn, status_fn):
+    status_fn("CHECK SN", AMBER)
+    main_window = WaitForMainAfterPopup(main_window=main_window, timeout=8)
+    if not main_window:
+        log_fn("  `- WARN Main form not found after popup OK", AMBER)
+        return False, None
+
+    repair_app = Application(backend="win32").connect(handle=main_window.handle)
+    repair_form = repair_app.window(handle=main_window.handle)
+
+    detect_sn = ReadDetectSN(repair_form)
+    log_fn(f"  `- Target SN    : {expected_sn}", TEXT_SEC)
+    log_fn(f"  `- Detect SN   : {detect_sn or '(blank)'}", TEXT_SEC)
+
+    if NormalizeSN(detect_sn) and NormalizeSN(detect_sn) == NormalizeSN(expected_sn):
+        log_fn("  `- OK Detect SN matches target SN - continue red-row detection", GREEN)
+        return True, main_window
+
+    log_fn("  `- INFO Detect SN does not match target SN - skip red-row detection", AMBER)
+    return False, main_window
+
+
 # ============================================================
 #  REPAIR WINDOW ACTIONS
 # ============================================================
@@ -681,7 +803,12 @@ def WaitForScrapControls(form, log_fn, timeout=5):
 def _control_text(ctrl):
     try:
         texts = ctrl.texts()
-        return texts[0].strip() if texts else ""
+        if texts:
+            return str(texts[0]).strip()
+    except Exception:
+        pass
+    try:
+        return str(ctrl.window_text()).strip()
     except Exception:
         return ""
 
@@ -2226,14 +2353,16 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         log_fn("Waiting for popup or main form...", BLUE)
         wait_result, main_window = WaitForPopupOrMainForm(log_fn, timeout=10)
         if wait_result == "popup":
-            PrepareForNextSN(None, log_fn, status_fn)
-            log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
-            status_fn("SKIPPED", AMBER)
-            return {
-                "completed": True,
-                "code": None,
-                "message": "SN already scrapped",
-            }
+            sn_match, main_window = PopupSNMatchesForRedDetection(None, sn, log_fn, status_fn)
+            if not sn_match:
+                PrepareForNextSN(None, log_fn, status_fn)
+                log_fn("  RESULT - Popup SN mismatch; skipped before red-row detection", AMBER)
+                status_fn("SKIPPED", AMBER)
+                return {
+                    "completed": True,
+                    "code": None,
+                    "message": "Popup SN mismatch",
+                }
 
         # ── รอ TfrmMain ──────────────────────────────────────
         repair_app  = Application(backend="win32").connect(handle=main_window.handle)
@@ -2242,14 +2371,18 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
 
         status_fn("CHECK POPUP", AMBER)
         if ClickAlreadyScrappedOK(log_fn, timeout=1):
-            PrepareForNextSN(repair_form, log_fn, status_fn)
-            log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
-            status_fn("SKIPPED", AMBER)
-            return {
-                "completed": True,
-                "code": None,
-                "message": "SN already scrapped",
-            }
+            sn_match, main_window = PopupSNMatchesForRedDetection(main_window, sn, log_fn, status_fn)
+            if not sn_match:
+                PrepareForNextSN(repair_form, log_fn, status_fn)
+                log_fn("  RESULT - Popup SN mismatch; skipped before red-row detection", AMBER)
+                status_fn("SKIPPED", AMBER)
+                return {
+                    "completed": True,
+                    "code": None,
+                    "message": "Popup SN mismatch",
+                }
+            repair_app = Application(backend="win32").connect(handle=main_window.handle)
+            repair_form = repair_app.window(handle=main_window.handle)
 
         repair_form.set_focus()
         time.sleep(1)

@@ -578,7 +578,7 @@ def ReadDetectSN(main_form):
     return value or ReadFirstNonEmptyEdit(main_form)
 
 
-def WaitForMainAfterPopup(main_window=None, timeout=8):
+def WaitForMainAfterPopup(main_window=None, timeout=5):
     start = time.time()
 
     while time.time() - start < timeout:
@@ -592,7 +592,7 @@ def WaitForMainAfterPopup(main_window=None, timeout=8):
 
 def PopupSNMatchesForRedDetection(main_window, expected_sn, log_fn, status_fn):
     status_fn("CHECK SN", AMBER)
-    main_window = WaitForMainAfterPopup(main_window=main_window, timeout=8)
+    main_window = WaitForMainAfterPopup(main_window=main_window, timeout=5)
     if not main_window:
         log_fn("  `- WARN Main form not found after popup OK", AMBER)
         return False, None
@@ -1592,7 +1592,7 @@ def WaitForPopupOrMainForm(log_fn, timeout=10):
     raise RuntimeError(f"Timeout {timeout}s: neither already-scrapped popup nor TfrmMain appeared")
 
 
-def ClickScrapSuccessOK(log_fn, timeout=8):
+def ClickScrapSuccessOK(log_fn, timeout=5):
     expected_text = "scrap the production successfully"
     start = time.time()
     while time.time() - start < timeout:

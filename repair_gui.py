@@ -368,6 +368,33 @@ def FindMainForm():
     return None
 
 
+def _has_repair_button(win):
+    try:
+        form = Application(backend="win32").connect(handle=win.handle).window(handle=win.handle)
+        return form.child_window(title="Repair", class_name="TBitBtn", found_index=0).exists()
+    except Exception:
+        return False
+
+
+def FindRepairInputWindow(repair_windows=None):
+    repair_windows = repair_windows or Desktop(backend="win32").windows(
+        title_re=r"^Repair-Rev",
+        top_level_only=True,
+        visible_only=True,
+    )
+
+    foreground_handle = ctypes.windll.user32.GetForegroundWindow()
+    for win in repair_windows:
+        if win.handle == foreground_handle and _has_repair_button(win):
+            return win
+
+    for win in repair_windows:
+        if _has_repair_button(win):
+            return win
+
+    return None
+
+
 def WaitForRepairWindow(timeout=10):
     start = time.time()
     while time.time() - start < timeout:
@@ -1819,6 +1846,24 @@ def ClickChange(main_form, log_fn):
     return False
 
 
+def PrepareForNextSN(main_form, log_fn, status_fn=None):
+    if status_fn:
+        status_fn("CLICK CHANGE", AMBER)
+
+    if main_form is None:
+        main_window = FindMainForm()
+        if not main_window:
+            log_fn("  `- INFO No main form open; input window should already be ready", TEXT_SEC)
+            return False
+        main_form = Application(backend="win32").connect(handle=main_window.handle).window(handle=main_window.handle)
+
+    try:
+        main_form.set_focus()
+    except Exception:
+        pass
+    return ClickChange(main_form, log_fn)
+
+
 # ============================================================
 #  CORE
 # ============================================================
@@ -2148,11 +2193,16 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         if not repair_windows:
             raise RuntimeError("Repair-Rev window not found")
 
-        foreground_handle = ctypes.windll.user32.GetForegroundWindow()
-        window = next(
-            (w for w in repair_windows if w.handle == foreground_handle),
-            repair_windows[0]
-        )
+        window = FindRepairInputWindow(repair_windows)
+        if not window:
+            main_window = FindMainForm()
+            if main_window:
+                main_form = Application(backend="win32").connect(handle=main_window.handle).window(handle=main_window.handle)
+                log_fn("  `- WARN Repair input window not active; clicking Change first", AMBER)
+                PrepareForNextSN(main_form, log_fn, status_fn)
+                window = FindRepairInputWindow()
+            if not window:
+                raise RuntimeError("Repair input window not found")
         log_fn("✓ Connected to Repair-Rev", GREEN)
 
         app        = Application(backend="win32").connect(handle=window.handle)
@@ -2176,6 +2226,7 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
         log_fn("Waiting for popup or main form...", BLUE)
         wait_result, main_window = WaitForPopupOrMainForm(log_fn, timeout=10)
         if wait_result == "popup":
+            PrepareForNextSN(None, log_fn, status_fn)
             log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
             status_fn("SKIPPED", AMBER)
             return {
@@ -2191,6 +2242,7 @@ def RunRepairProcess(sn, log_fn, status_fn, cfg=None):
 
         status_fn("CHECK POPUP", AMBER)
         if ClickAlreadyScrappedOK(log_fn, timeout=1):
+            PrepareForNextSN(repair_form, log_fn, status_fn)
             log_fn("  RESULT - SN already scrapped; skipped before red-row detection", AMBER)
             status_fn("SKIPPED", AMBER)
             return {
